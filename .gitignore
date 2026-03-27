@@ -28,7 +28,7 @@ esri_vis_cache/
 # ── Regional map tiles (large image assets — manage outside git) ──────────────
 regional_data/
 
-
+static_data.rar
 data/
 
 # ── OSM shapefile data (large, download separately) ───────────────────────────

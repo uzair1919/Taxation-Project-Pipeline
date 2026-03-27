@@ -65,6 +65,8 @@ class MultiPlotSAM2:
         self.save_overlays = save_overlays
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.device == "cuda":
+            torch.backends.cudnn.benchmark = True
         self._log(f"Loading SAM2 on {self.device} …")
         self._log(f"  config     : {sam2_config}")
         self._log(f"  checkpoint : {sam2_checkpoint}")
@@ -127,6 +129,9 @@ class MultiPlotSAM2:
                     logger.debug(traceback.format_exc())
                     for prompt, _ in group_prompts:
                         results.append(self._failed_result(prompt, f"group error: {exc}"))
+                finally:
+                    if self.device == "cuda":
+                        torch.cuda.empty_cache()
 
         except Exception as exc:
             logger.error(f"[{point_id}/{stage}] SAM2 batch error: {exc}")

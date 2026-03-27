@@ -43,6 +43,21 @@ for _p in (cfg.REFINEMENT_ROOT, cfg.SAM2_ROOT):
         sys.path.insert(0, _s)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+class _RootInfoFilter(logging.Filter):
+    """Block specific root-logger INFO calls that third-party libs emit directly
+    via logging.info() instead of a named logger (so setLevel on a named logger
+    has no effect on them).
+    """
+    _BLOCKED = frozenset({
+        "For numpy array image, we assume (HxWxC) format",
+        "Computing image embeddings for the provided image...",
+        "Computing image embeddings for the provided images...",
+        "Image embeddings computed.",
+    })
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name != "root" or record.getMessage() not in self._BLOCKED
+
+
 def _setup_logging(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     fmt      = "%(asctime)s [%(levelname)-8s] %(message)s"
@@ -51,8 +66,20 @@ def _setup_logging(output_dir: Path) -> None:
         logging.FileHandler(output_dir / "pipeline.log", mode="a", encoding="utf-8"),
     ]
     logging.basicConfig(level=logging.INFO, format=fmt, handlers=handlers)
+    # Block root-level INFO noise from third-party libs that bypass named loggers
+    _f = _RootInfoFilter()
+    for h in logging.root.handlers:
+        h.addFilter(_f)
+    # Libraries that are too chatty at INFO/WARNING level
     for lib in ("httpx", "urllib3", "PIL", "shapely", "fiona",
-                "pyproj", "rasterio", "huggingface_hub"):
+                "pyproj", "huggingface_hub"):
+        logging.getLogger(lib).setLevel(logging.WARNING)
+    # rasterio/GDAL emit repetitive TIFF photometric warnings — suppress to ERROR
+    for lib in ("rasterio", "rasterio._env", "rasterio.env"):
+        logging.getLogger(lib).setLevel(logging.ERROR)
+    # SAM2 named-logger messages (belt-and-suspenders alongside the root filter)
+    for lib in ("sam2", "sam2.sam2_image_predictor", "sam2.build_sam",
+                "sam2.modeling", "sam2.utils"):
         logging.getLogger(lib).setLevel(logging.WARNING)
 
 
@@ -451,7 +478,7 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python orchestrator.py data\coordinates_data1_points.csv
+  python orchestrator.py data/coordinates_data1_points.csv
   python orchestrator.py points.csv --skip-existing -o results/
   python orchestrator.py points.csv --stage1-only
   python orchestrator.py points.csv --stage2-only

@@ -32,6 +32,21 @@ import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request
 
+# Import height thresholds from config so visualiser adapts automatically
+# when the user edits HEIGHT_STORY_THRESHOLDS in config.py.
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from config import HEIGHT_STORY_THRESHOLDS as _HEIGHT_STORY_THRESHOLDS
+except Exception:
+    _HEIGHT_STORY_THRESHOLDS = [
+        (0.0,   3.0,  "0-1 storeys"),
+        (3.0,   6.0,  "1-2 storeys"),
+        (6.0,   9.0,  "2-3 storeys"),
+        (9.0,  12.0,  "3-4 storeys"),
+        (12.0, 15.0,  "4-5 storeys"),
+        (15.0, 999.0, "5+ storeys"),
+    ]
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("visualiser")
 
@@ -192,14 +207,31 @@ def _safe_str(v) -> Optional[str]:
     return None if s in ("nan", "None", "") else s
 
 
-HEIGHT_CLASS_COLORS = {
-    "0-1 storeys": (100, 210, 100),
-    "1-2 storeys": (180, 230, 80),
-    "2-3 storeys": (255, 220, 50),
-    "3-4 storeys": (255, 155, 30),
-    "4-5 storeys": (255, 70,  30),
-    "5+ storeys":  (200, 20,  20),
-}
+def _build_height_class_colors() -> dict:
+    """Generate a green→yellow→red palette for each height class in config."""
+    import matplotlib
+    n = len(_HEIGHT_STORY_THRESHOLDS)
+    try:
+        cmap = matplotlib.colormaps["RdYlGn"].reversed()
+    except Exception:
+        import matplotlib.cm as _cm
+        cmap = _cm.get_cmap("RdYlGn_r")
+    colors = {}
+    for i, (_, _, label) in enumerate(_HEIGHT_STORY_THRESHOLDS):
+        t = i / max(n - 1, 1)
+        r, g, b, _ = cmap(t)
+        colors[label] = (int(r * 255), int(g * 255), int(b * 255))
+    return colors
+
+def _height_vis_max() -> float:
+    """Colormap upper limit = lower bound of the last (open-ended) class.
+    Concentrates contrast in the low-storey range where most plots fall."""
+    if len(_HEIGHT_STORY_THRESHOLDS) >= 2:
+        return float(_HEIGHT_STORY_THRESHOLDS[-1][0])
+    return 60.0
+
+HEIGHT_CLASS_COLORS = _build_height_class_colors()
+_HEIGHT_VIS_MAX     = _height_vis_max()
 
 def _class_color(label: Optional[str]) -> Tuple[int, int, int]:
     if not label or str(label).strip() in ("nan", "None", ""):
@@ -314,10 +346,7 @@ def _render_on_background(
     canvas:         np.ndarray,        # (H, W, 3) uint8 — modified in-place clone
     west:  float, south: float, east: float, north: float,
     polygon_coords: Optional[list],
-    sam_mask_rle:   Optional[str],
-    sam_mask_h:     int,
-    sam_mask_w:     int,
-    sam_bbox_wkt:   Optional[str],
+    sam_mask_wkt:   Optional[str],
     height_class:   Optional[str],
     show_polygon:   bool = True,
     show_sam_mask:  bool = True,
@@ -339,13 +368,9 @@ def _render_on_background(
     if show_sam_mask:
         mask = None
 
-        # Attempt 1: decode RLE stored in Excel
-        if sam_mask_rle and str(sam_mask_rle).strip() not in ("nan", "None", ""):
-            mask = _decode_rle(str(sam_mask_rle), int(sam_mask_h), int(sam_mask_w))
-
-        # Attempt 2: rasterise the SAM bbox WKT polygon on the canvas grid
-        if mask is None and sam_bbox_wkt and str(sam_bbox_wkt).strip() not in ("nan", "None", ""):
-            bbox_coords = _wkt_to_coords(str(sam_bbox_wkt))
+        # Rasterise the SAM mask WKT polygon on the canvas grid
+        if sam_mask_wkt and str(sam_mask_wkt).strip() not in ("nan", "None", ""):
+            bbox_coords = _wkt_to_coords(str(sam_mask_wkt))
             if bbox_coords:
                 pts = np.array(
                     [_geo_to_px(lon, lat, west, south, east, north, w, h)
@@ -435,7 +460,7 @@ def _build_height_bg(point_id, year, out_size, poly_bbox_wgs84=None):
             return None, None
 
     bbox = _point_bbox_from_config(lat_c, lon_c)
-    coloured = _apply_colormap(pred, vmin=0, vmax=60, cmap_name="inferno")
+    coloured = _apply_colormap(pred, vmin=0, vmax=_HEIGHT_VIS_MAX, cmap_name="inferno")
     bg = cv2.resize(coloured, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
     return bg, bbox
 
@@ -505,9 +530,7 @@ def api_plots(point_id: str):
             "sam_score":    _safe_float(row.get("sam_score")),
             "sam_iou":      _safe_float(row.get("sam_iou")),
             "sam_area_m2":  _safe_float(row.get("sam_area_m2")),
-            "sam_mask_rle": str(row.get("sam_mask_rle", "")),
-            "sam_mask_h":   int(row.get("sam_mask_h", 0) or 0),
-            "sam_mask_w":   int(row.get("sam_mask_w", 0) or 0),
+            "sam_mask_wkt": str(row.get("sam_mask_wkt", "")),
             "sam_bbox_wkt": str(row.get("sam_bbox_wkt", "")),
         }
         if year:
@@ -579,10 +602,7 @@ def api_render_plot():
     poly_bbox = _coords_bbox(polygon_coords)   # (west, south, east, north)
 
     height_class = _safe_str(row.get(f"height_class_{year}", None))
-    sam_mask_rle = str(row.get("sam_mask_rle", ""))
-    sam_mask_h   = int(row.get("sam_mask_h", 0) or 0)
-    sam_mask_w   = int(row.get("sam_mask_w", 0) or 0)
-    sam_bbox_wkt = str(row.get("sam_bbox_wkt", ""))
+    sam_mask_wkt = str(row.get("sam_mask_wkt", ""))
 
     # ── Build background + determine render bbox ──────────────────────────
     bg      = None
@@ -615,10 +635,7 @@ def api_render_plot():
         canvas        = bg,
         west=bw, south=bs, east=be, north=bn,
         polygon_coords = polygon_coords,
-        sam_mask_rle   = sam_mask_rle,
-        sam_mask_h     = sam_mask_h,
-        sam_mask_w     = sam_mask_w,
-        sam_bbox_wkt   = sam_bbox_wkt,
+        sam_mask_wkt   = sam_mask_wkt,
         height_class   = height_class,
         show_polygon   = show_poly,
         show_sam_mask  = show_mask,
@@ -707,16 +724,10 @@ def api_render_overview():
             # SAM mask overlay if requested
             if show_mask:
                 mask = None
-                rle  = str(row.get("sam_mask_rle", ""))
-                mh   = int(row.get("sam_mask_h", 0) or 0)
-                mw   = int(row.get("sam_mask_w", 0) or 0)
-                bwkt = str(row.get("sam_bbox_wkt", ""))
+                mwkt = str(row.get("sam_mask_wkt", ""))
 
-                if rle.strip() not in ("nan", "None", ""):
-                    mask = _decode_rle(rle, mh, mw)
-
-                if mask is None and bwkt.strip() not in ("nan", "None", ""):
-                    bc = _wkt_to_coords(bwkt)
+                if mwkt.strip() not in ("nan", "None", ""):
+                    bc = _wkt_to_coords(mwkt)
                     if bc:
                         bp = np.array([_geo_to_px(lon, lat, bw, bs, be, bn, w, h)
                                        for lon, lat in bc], dtype=np.int32)
@@ -774,7 +785,7 @@ def api_colorbar():
 
     fig, ax = plt.subplots(figsize=(4, 0.45))
     fig.subplots_adjust(bottom=0.5)
-    norm = mcolors.Normalize(vmin=0, vmax=60)
+    norm = mcolors.Normalize(vmin=0, vmax=_HEIGHT_VIS_MAX)
     try:
         cmap = matplotlib.colormaps["inferno"]
     except Exception:
@@ -783,7 +794,7 @@ def api_colorbar():
     cb = matplotlib.colorbar.ColorbarBase(
         ax, cmap=cmap, norm=norm, orientation="horizontal"
     )
-    cb.set_label("Height (m)", color="white", fontsize=9)
+    cb.set_label(f"Height (m)  [0 – {_HEIGHT_VIS_MAX:.0f} m]", color="white", fontsize=9)
     ax.tick_params(colors="white", labelsize=8)
     fig.patch.set_facecolor("#1a1a2e")
     buf = io.BytesIO()

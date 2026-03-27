@@ -2,7 +2,6 @@ import os
 import torch
 import numpy as np
 from PIL import Image
-from tqdm import tqdm
 from os.path import join as opj
 
 from tswin_unet.libs.process import *
@@ -13,6 +12,10 @@ class BHEPredictor(object):
 
     def __init__(self, model_path, configs):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if self.device == 'cuda':
+            # T-SwinUNet always processes 128×128 inputs — fixed size means
+            # cuDNN can benchmark once and reuse the fastest algorithm.
+            torch.backends.cudnn.benchmark = True
 
         model_dict = torch.load(model_path, map_location='cpu')
         model = define_model(configs.model)
@@ -36,14 +39,18 @@ class BHEPredictor(object):
     @torch.no_grad()
     def predict(self, data_dir, subjects, output_dir):
         os.makedirs(output_dir, exist_ok=True)
-        for subject in tqdm(subjects, ncols=88):
+        for subject in subjects:
             feature, mask = self._load_data(data_dir, subject)
             feature = torch.from_numpy(feature)
             feature = feature.to(self.device)        
             mask = torch.from_numpy(mask)
             mask = mask.to(self.device)
 
-            pred, rseg, seg = self.model(feature, mask)           
+            if self.device == 'cuda':
+                with torch.autocast('cuda'):
+                    pred, rseg, seg = self.model(feature, mask)
+            else:
+                pred, rseg, seg = self.model(feature, mask)
             pred = pred.cpu().numpy()[0, 0]
 
             from ..process.utils import recover_label
