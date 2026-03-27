@@ -12,8 +12,8 @@ Responsibilities
 4. For each PlotRecord (both stage1 and stage2):
    a. Project the plot's WKT polygon onto the 128×128 raster grid.
    b. Also use the SAM mask (if available) as a refined building footprint.
-   c. Extract height pixel values within the mask and compute the mean.
-   d. Classify the mean height into storeys using configurable thresholds.
+   c. Extract height pixel values within the mask and compute the median.
+   d. Classify the median height into storeys using configurable thresholds.
 5. Attach HeightResult(year→{height_m, height_class}) to each PlotRecord.
 
 Key design decisions
@@ -74,9 +74,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class HeightYearResult:
     """Height estimate for one plot for one year."""
-    height_m:     Optional[float]   # mean height in metres; None = inference failed
+    height_m:     Optional[float]   # median height in metres; None = inference failed
     height_class: Optional[str]     # storey label; None = inference failed
-    n_pixels:     int               # pixels used for averaging (0 = failed)
+    n_pixels:     int               # pixels used for aggregation (0 = failed)
     source:       str               # "sam_mask" | "polygon" | "failed"
 
 
@@ -169,8 +169,12 @@ def _extract_height_from_raster(
     mask:     np.ndarray,    # (128, 128) binary mask
 ) -> Tuple[Optional[float], int]:
     """
-    Extract mean height from pred_arr within the binary mask.
-    Returns (mean_height_m, n_pixels) or (None, 0).
+    Extract median height from pred_arr within the binary mask.
+    Returns (median_height_m, n_pixels) or (None, 0).
+
+    Median is used instead of mean because edge pixels and shadow/no-data
+    pixels produce low outliers that pull the mean toward lower classes.
+    Median is robust to these tails and picks the dominant height in the mask.
     """
     if mask is None or mask.sum() == 0:
         return None, 0
@@ -179,9 +183,9 @@ def _extract_height_from_raster(
     # Exclude zero-height pixels (likely no-data) if there are non-zero ones
     nonzero = vals[vals > 0]
     if len(nonzero) > 0:
-        return float(np.mean(nonzero)), int(len(nonzero))
+        return float(np.median(nonzero)), int(len(nonzero))
     elif len(vals) > 0:
-        return float(np.mean(vals)), int(len(vals))
+        return float(np.median(vals)), int(len(vals))
     return None, 0
 
 
