@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pipeline Output Visualiser</title>
+<style>
+  :root {
+    --bg:     #0d1117; --bg2:    #161b22; --bg3:    #1f2937;
+    --border: #30363d; --text:   #e6edf3; --muted:  #8b949e;
+    --accent: #58a6ff; --green:  #3fb950; --yellow: #d29922;
+    --orange: #f0883e; --red:    #f85149; --cyan:   #39d2c0;
+    --panel-w: 270px;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+
+  /* Top bar */
+  #topbar { display:flex; align-items:center; gap:10px; padding:8px 14px; background:var(--bg2); border-bottom:1px solid var(--border); flex-shrink:0; flex-wrap:wrap; }
+  #topbar h1 { font-size:15px; font-weight:600; color:var(--accent); }
+  #topbar select { background:var(--bg3); border:1px solid var(--border); color:var(--text); border-radius:5px; padding:4px 8px; font-size:12px; cursor:pointer; }
+  #topbar .sep { flex:1; }
+  #status { font-size:11px; color:var(--muted); }
+
+  /* Main */
+  #main { display:flex; flex:1; overflow:hidden; }
+
+  /* Points panel */
+  #panel-points { width:var(--panel-w); background:var(--bg2); border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; flex-shrink:0; }
+  #panel-points h2 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); padding:8px 10px 4px; }
+  #points-search { margin:0 6px 5px; padding:5px 8px; background:var(--bg3); border:1px solid var(--border); border-radius:5px; color:var(--text); font-size:12px; }
+  #points-list { flex:1; overflow-y:auto; }
+  .point-item { padding:7px 10px; cursor:pointer; border-bottom:1px solid var(--border); transition:background .12s; }
+  .point-item:hover { background:var(--bg3); }
+  .point-item.active { background:#1d3557; border-left:3px solid var(--accent); }
+  .point-item .pid { font-size:12px; font-weight:600; }
+  .point-item .pname { font-size:10px; color:var(--muted); }
+  .point-item .pcounts { font-size:10px; color:var(--cyan); margin-top:1px; }
+
+  /* Plots panel */
+  #panel-plots { width:var(--panel-w); background:var(--bg2); border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; flex-shrink:0; }
+  #panel-plots h2 { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); padding:8px 10px 4px; }
+  #stage-tabs { display:flex; border-bottom:1px solid var(--border); }
+  .stage-tab { flex:1; padding:6px 0; text-align:center; font-size:11px; cursor:pointer; color:var(--muted); background:var(--bg2); border:none; transition:all .12s; }
+  .stage-tab.active { color:var(--accent); border-bottom:2px solid var(--accent); }
+  .stage-tab:hover:not(.active) { color:var(--text); background:var(--bg3); }
+  #overview-btn { margin:5px 6px 3px; padding:6px 0; background:var(--bg3); border:1px solid var(--border); border-radius:5px; color:var(--cyan); font-size:11px; cursor:pointer; width:calc(100% - 12px); }
+  #overview-btn:hover { border-color:var(--cyan); }
+  #plots-list { flex:1; overflow-y:auto; }
+  .plot-item { padding:6px 10px; cursor:pointer; border-bottom:1px solid var(--border); transition:background .12s; }
+  .plot-item:hover { background:var(--bg3); }
+  .plot-item.active { background:#1d3557; border-left:3px solid var(--accent); }
+  .plot-item .plot-id { font-size:11px; font-weight:600; }
+  .plot-item .plot-meta { font-size:10px; color:var(--muted); margin-top:1px; }
+  .hbadge { display:inline-block; padding:1px 5px; border-radius:3px; font-size:9px; font-weight:600; margin-top:2px; }
+  .no-plots { padding:16px 10px; color:var(--muted); font-size:11px; text-align:center; }
+
+  /* Viewer */
+  #panel-viewer { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
+  #viewer-top { display:flex; align-items:center; gap:8px; padding:6px 12px; background:var(--bg2); border-bottom:1px solid var(--border); flex-wrap:wrap; flex-shrink:0; }
+  .vlabel { font-size:11px; color:var(--muted); }
+  .vtoggle-group { display:flex; border:1px solid var(--border); border-radius:5px; overflow:hidden; }
+  .vtoggle { padding:4px 10px; font-size:11px; cursor:pointer; color:var(--muted); background:var(--bg3); border:none; border-right:1px solid var(--border); transition:all .12s; }
+  .vtoggle:last-child { border-right:none; }
+  .vtoggle.active { background:#1d3557; color:var(--accent); }
+  .vtoggle:hover:not(.active):not(:disabled) { color:var(--text); }
+  .vtoggle:disabled { opacity:.35; cursor:not-allowed; }
+  .chk-group { display:flex; gap:10px; align-items:center; }
+  .chk { display:flex; align-items:center; gap:4px; cursor:pointer; font-size:11px; }
+  .chk input { accent-color:var(--accent); cursor:pointer; }
+  .sep2 { flex:1; }
+  .zoom-ctrl { display:flex; align-items:center; gap:5px; }
+  .zoom-ctrl label { font-size:10px; color:var(--muted); }
+  .zoom-ctrl input { background:var(--bg3); border:1px solid var(--border); color:var(--text); border-radius:4px; padding:2px 6px; font-size:11px; width:48px; text-align:center; }
+
+  /* Viewer body */
+  #viewer-body { flex:1; display:flex; overflow:hidden; }
+  #view-container { flex:1; position:relative; overflow:hidden; background:#09090f; display:flex; align-items:center; justify-content:center; }
+
+  /* Zoomable image wrapper */
+  #zoom-wrapper { position:absolute; top:0; left:0; width:100%; height:100%; display:flex; align-items:center; justify-content:center; cursor:grab; }
+  #zoom-wrapper:active { cursor:grabbing; }
+  #main-img { display:none; max-width:none; max-height:none; transform-origin:center center; user-select:none; border-radius:3px; box-shadow:0 0 25px rgba(0,0,0,.6); }
+
+  /* Zoom hint */
+  #zoom-hint { position:absolute; bottom:8px; right:8px; font-size:10px; color:rgba(255,255,255,.3); pointer-events:none; }
+
+  /* Reset zoom button */
+  #zoom-reset { position:absolute; top:8px; right:8px; padding:3px 8px; font-size:10px; background:rgba(0,0,0,.5); border:1px solid var(--border); color:var(--muted); border-radius:4px; cursor:pointer; display:none; }
+  #zoom-reset:hover { color:var(--text); }
+
+  #placeholder { color:var(--muted); font-size:13px; text-align:center; padding:30px; line-height:2; pointer-events:none; }
+  #loading { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55); z-index:10; }
+  .spinner { width:32px; height:32px; border:3px solid var(--bg3); border-top:3px solid var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  /* Info sidebar */
+  #info-sidebar { width:210px; background:var(--bg2); border-left:1px solid var(--border); padding:10px; overflow-y:auto; flex-shrink:0; }
+  #info-sidebar h3 { font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:6px; }
+  .irow { display:flex; justify-content:space-between; margin-bottom:5px; padding-bottom:5px; border-bottom:1px solid var(--border); font-size:11px; }
+  .irow:last-child { border-bottom:none; }
+  .ik { color:var(--muted); }
+  .iv { color:var(--text); font-weight:500; text-align:right; max-width:110px; word-break:break-word; }
+  .iv.good { color:var(--green); }
+  .iv.warn { color:var(--yellow); }
+  .iv.bad  { color:var(--red); }
+  .sdiv { margin:8px 0 5px; border-top:1px solid var(--border); padding-top:6px; }
+  .apill { display:inline-block; padding:1px 5px; border-radius:8px; font-size:9px; margin-right:3px; }
+  .ayes { background:#1a3a1a; color:var(--green); border:1px solid var(--green); }
+  .ano  { background:#2a1a1a; color:var(--muted); border:1px solid var(--border); }
+  #colorbar-img { width:100%; margin-top:6px; border-radius:3px; }
+  .cls-legend { display:flex; align-items:center; gap:5px; margin-top:3px; font-size:10px; }
+  .cls-swatch { width:11px; height:11px; border-radius:2px; flex-shrink:0; }
+
+  ::-webkit-scrollbar { width:5px; }
+  ::-webkit-scrollbar-track { background:var(--bg); }
+  ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>📡 Pipeline Output Visualiser</h1>
+  <span class="vlabel">Year:</span>
+  <select id="year-select"></select>
+  <span class="sep"></span>
+  <span id="status">Loading…</span>
+</div>
+
+<div id="main">
+
+  <!-- Points -->
+  <div id="panel-points">
+    <h2>Points</h2>
+    <input type="text" id="points-search" placeholder="Search…">
+    <div id="points-list"></div>
+  </div>
+
+  <!-- Plots -->
+  <div id="panel-plots">
+    <h2>Plots</h2>
+    <div id="stage-tabs">
+      <button class="stage-tab active" data-stage="stage1">Stage 1</button>
+      <button class="stage-tab"        data-stage="stage2">Stage 2</button>
+      <button class="stage-tab"        data-stage="both">Both</button>
+    </div>
+    <button id="overview-btn">🗺 View All in Context</button>
+    <div id="plots-list"><div class="no-plots">← Select a point</div></div>
+  </div>
+
+  <!-- Viewer -->
+  <div id="panel-viewer">
+    <div id="viewer-top">
+      <span class="vlabel">Background:</span>
+      <div class="vtoggle-group">
+        <button class="vtoggle active" data-view="esri">🛰 ESRI</button>
+        <button class="vtoggle" data-view="height" id="btn-height">📊 Height</button>
+        <button class="vtoggle" data-view="sat"    id="btn-sat">🌍 GEE</button>
+      </div>
+      <span class="vlabel">Overlays:</span>
+      <div class="chk-group">
+        <label class="chk"><input type="checkbox" id="chk-poly"  checked> Boundary</label>
+        <label class="chk"><input type="checkbox" id="chk-mask"  checked> SAM Mask</label>
+      </div>
+      <div class="sep2"></div>
+      <div class="zoom-ctrl">
+        <label>ESRI zoom:</label>
+        <input type="number" id="zoom-val" value="19" min="14" max="21">
+      </div>
+    </div>
+
+    <div id="viewer-body">
+      <div id="view-container">
+        <div id="placeholder">← Select a point, then a plot<br><small style="font-size:11px;color:#444">Scroll to zoom · Drag to pan</small></div>
+        <div id="zoom-wrapper">
+          <img id="main-img" alt="">
+        </div>
+        <button id="zoom-reset" title="Reset zoom">↺ Reset</button>
+        <div id="loading"><div class="spinner"></div></div>
+        <div id="zoom-hint">scroll to zoom · drag to pan</div>
+      </div>
+
+      <div id="info-sidebar">
+        <h3>Plot Info</h3>
+        <div id="info-content"><div style="color:var(--muted);font-size:10px">Select a plot</div></div>
+        <div class="sdiv"></div>
+        <h3>Files</h3>
+        <div id="avail-content"><div style="color:var(--muted);font-size:10px">—</div></div>
+        <div class="sdiv"></div>
+        <h3>Height Scale</h3>
+        <img id="colorbar-img" style="display:none" alt="">
+        <div id="cls-legend"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ═══════════════════════════════ STATE ═══════════════════════════════ */
+const S = {
+  points: [], pid: null,
+  plots: { stage1: [], stage2: [] },
+  activeStage: "stage1",
+  selectedPlot: null,
+  view: "esri",
+  year: null, years: [],
+  avail: {},
+  // pan/zoom
+  scale: 1, tx: 0, ty: 0,
+  dragging: false, lastX: 0, lastY: 0,
+};
+
+/* ═══════════════════════════════ HELPERS ════════════════════════════ */
+const $ = id => document.getElementById(id);
+
+function hclassColor(cls) {
+  const map = {
+    "0-1 storeys":"#64d264","1-2 storeys":"#b4e650",
+    "2-3 storeys":"#ffe632","3-4 storeys":"#ffa51e",
+    "4-5 storeys":"#ff501e","5+ storeys":"#c81414"
+  };
+  return map[cls] || "#9966ff";
+}
+
+async function apiJSON(url) {
+  const r = await fetch(url);
+  const ct = r.headers.get("content-type") || "";
+  if (!ct.includes("application/json")) {
+    throw new Error(`Server error (${r.status}): non-JSON response`);
+  }
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+/* ═══════════════════════════════ ZOOM/PAN ═══════════════════════════ */
+function applyTransform() {
+  $("main-img").style.transform = `translate(${S.tx}px,${S.ty}px) scale(${S.scale})`;
+  $("zoom-reset").style.display = (S.scale !== 1 || S.tx !== 0 || S.ty !== 0) ? "" : "none";
+}
+
+function resetTransform() {
+  S.scale = 1; S.tx = 0; S.ty = 0;
+  applyTransform();
+}
+
+function initZoomPan() {
+  const wrapper = $("zoom-wrapper");
+  const img     = $("main-img");
+
+  // Mouse wheel → zoom centred on cursor
+  wrapper.addEventListener("wheel", e => {
+    e.preventDefault();
+    const rect   = wrapper.getBoundingClientRect();
+    const cx     = e.clientX - rect.left - rect.width  / 2;
+    const cy     = e.clientY - rect.top  - rect.height / 2;
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const newScale = Math.max(0.5, Math.min(12, S.scale * factor));
+    // Adjust translation so the cursor point stays fixed
+    S.tx = cx - (cx - S.tx) * (newScale / S.scale);
+    S.ty = cy - (cy - S.ty) * (newScale / S.scale);
+    S.scale = newScale;
+    applyTransform();
+  }, { passive: false });
+
+  // Drag to pan
+  wrapper.addEventListener("mousedown", e => {
+    if (e.button !== 0) return;
+    S.dragging = true;
+    S.lastX = e.clientX;
+    S.lastY = e.clientY;
+  });
+  window.addEventListener("mousemove", e => {
+    if (!S.dragging) return;
+    S.tx += e.clientX - S.lastX;
+    S.ty += e.clientY - S.lastY;
+    S.lastX = e.clientX;
+    S.lastY = e.clientY;
+    applyTransform();
+  });
+  window.addEventListener("mouseup",  () => { S.dragging = false; });
+
+  $("zoom-reset").addEventListener("click", resetTransform);
+}
+
+/* ═══════════════════════════════ INIT ═══════════════════════════════ */
+async function init() {
+  initZoomPan();
+
+  const meta = await apiJSON("/api/meta").catch(e => { $("status").textContent = "Load failed: "+e.message; return null; });
+  if (!meta) return;
+
+  S.years = meta.height_years;
+  const ysel = $("year-select");
+  ysel.innerHTML = "";
+  if (S.years.length) {
+    S.years.forEach(y => {
+      const o = document.createElement("option"); o.value=y; o.textContent=y; ysel.appendChild(o);
+    });
+    S.year = S.years[S.years.length - 1];
+    ysel.value = S.year;
+  } else {
+    const o = document.createElement("option"); o.value=""; o.textContent="N/A"; ysel.appendChild(o);
+  }
+  ysel.addEventListener("change", () => {
+    S.year = parseInt(ysel.value) || null;
+    if (S.pid) loadPlots(S.pid);
+    if (S.selectedPlot) render();
+  });
+
+  await loadPoints();
+  loadColorbar();
+  $("status").textContent = `${meta.n_points} points`;
+
+  // Stage tabs
+  document.querySelectorAll(".stage-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".stage-tab").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      S.activeStage = btn.dataset.stage;
+      renderPlotsList();
+    });
+  });
+
+  // View toggles
+  document.querySelectorAll(".vtoggle").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (btn.disabled) return;
+      document.querySelectorAll(".vtoggle").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      S.view = btn.dataset.view;
+      if (S.selectedPlot) render();
+      else if (S.pid && document.querySelector(".plot-item.active") === null) renderOverview();
+    });
+  });
+
+  // Overlay checkboxes
+  ["chk-poly","chk-mask"].forEach(id => {
+    $(id).addEventListener("change", () => {
+      if (S.selectedPlot) render(); else renderOverview();
+    });
+  });
+
+  // ESRI zoom
+  $("zoom-val").addEventListener("change", () => {
+    if (S.selectedPlot) render();
+  });
+
+  // Overview button
+  $("overview-btn").addEventListener("click", renderOverview);
+
+  // Points search
+  $("points-search").addEventListener("input", e => {
+    const q = e.target.value.toLowerCase();
+    document.querySelectorAll(".point-item").forEach(el => {
+      el.style.display = el.dataset.search.includes(q) ? "" : "none";
+    });
+  });
+}
+
+/* ═══════════════════════════════ POINTS ════════════════════════════ */
+async function loadPoints() {
+  S.points = await apiJSON("/api/points");
+  const list = $("points-list");
+  list.innerHTML = "";
+  S.points.forEach(p => {
+    const el = document.createElement("div");
+    el.className = "point-item";
+    el.dataset.pid = p.point_id;
+    el.dataset.search = (p.point_id + " " + p.name).toLowerCase();
+    el.innerHTML = `
+      <div class="pid">${p.point_id}</div>
+      <div class="pname">${p.name || "—"}</div>
+      <div class="pcounts">S1:${p.n_stage1_plots} S2:${p.n_stage2_plots} plots</div>`;
+    el.addEventListener("click", () => selectPoint(p.point_id));
+    list.appendChild(el);
+  });
+}
+
+async function selectPoint(pid) {
+  S.pid = pid; S.selectedPlot = null;
+  document.querySelectorAll(".point-item").forEach(e => e.classList.toggle("active", e.dataset.pid === pid));
+  document.querySelectorAll(".plot-item").forEach(e => e.classList.remove("active"));
+  showLoading(true);
+  await Promise.all([loadPlots(pid), loadAvail(pid)]);
+  renderPlotsList();
+  showLoading(false);
+  // Auto-show overview
+  renderOverview();
+}
+
+async function loadPlots(pid) {
+  const q = S.year ? `?year=${S.year}` : "";
+  S.plots = await apiJSON(`/api/plots/${pid}${q}`).catch(() => ({ stage1:[], stage2:[] }));
+}
+
+async function loadAvail(pid) {
+  S.avail = await apiJSON(`/api/available/${pid}`).catch(() => ({ pred_tifs:{}, sat_tifs:{} }));
+  const anyPred = S.years.some(y => S.avail.pred_tifs[y]);
+  const anySat  = S.years.some(y => S.avail.sat_tifs[y]);
+
+  const bh = $("btn-height");
+  const bs = $("btn-sat");
+  bh.disabled = !anyPred;
+  bs.disabled  = !anySat;
+  if (!anyPred && S.view === "height") { S.view = "esri"; document.querySelector('[data-view="esri"]').classList.add("active"); bh.classList.remove("active"); }
+  if (!anySat  && S.view === "sat")   { S.view = "esri"; document.querySelector('[data-view="esri"]').classList.add("active"); bs.classList.remove("active"); }
+
+  const div = $("avail-content");
+  div.innerHTML = "";
+  S.years.forEach(y => {
+    div.innerHTML += `<div class="irow">
+      <span class="ik">${y}</span>
+      <span>
+        <span class="apill ${S.avail.pred_tifs[y]?"ayes":"ano"}">pred</span>
+        <span class="apill ${S.avail.sat_tifs[y]?"ayes":"ano"}">sat</span>
+      </span></div>`;
+  });
+  if (!S.years.length) div.innerHTML = '<span style="color:var(--muted);font-size:10px">No height years</span>';
+}
+
+/* ═══════════════════════════════ PLOTS LIST ════════════════════════ */
+function renderPlotsList() {
+  const list = $("plots-list");
+  list.innerHTML = "";
+  const stages = S.activeStage === "both"
+    ? [["stage1", S.plots.stage1||[]], ["stage2", S.plots.stage2||[]]]
+    : [[S.activeStage, S.plots[S.activeStage]||[]]];
+
+  let total = 0;
+  stages.forEach(([stg, plots]) => {
+    if (S.activeStage === "both" && plots.length) {
+      const h = document.createElement("div");
+      h.style.cssText = "padding:3px 10px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);background:var(--bg3);border-bottom:1px solid var(--border)";
+      h.textContent = stg === "stage1" ? "STAGE 1" : "STAGE 2";
+      list.appendChild(h);
+    }
+    plots.forEach(plot => {
+      total++;
+      const el = document.createElement("div");
+      el.className = "plot-item";
+      const samOk = plot.sam_status === "success";
+      const cid   = plot.cluster_id != null ? ` C${plot.cluster_id}` : "";
+      const hc    = plot.height_class;
+      const hm    = plot.height_m;
+      const col   = hclassColor(hc);
+      el.innerHTML = `
+        <div class="plot-id">Plot ${plot.plot_index}${cid}
+          <span style="font-size:9px;color:${samOk?"var(--green)":"var(--red)"}">${samOk?"✓":"✗"}</span>
+        </div>
+        <div class="plot-meta">${plot.sam_area_m2?parseFloat(plot.sam_area_m2).toFixed(0)+"m²":"—"}${plot.sam_iou?" · IoU "+parseFloat(plot.sam_iou).toFixed(2):""}</div>
+        ${hc?`<div><span class="hbadge" style="background:${col}22;color:${col};border:1px solid ${col}44">${hc}${hm?" · "+parseFloat(hm).toFixed(1)+"m":""}</span></div>`:""}`;
+      el.addEventListener("click", () => selectPlot(stg, plot, el));
+      list.appendChild(el);
+    });
+  });
+
+  if (!total) list.innerHTML = '<div class="no-plots">No plots</div>';
+}
+
+function selectPlot(stg, plot, el) {
+  document.querySelectorAll(".plot-item").forEach(e => e.classList.remove("active"));
+  el.classList.add("active");
+  S.selectedPlot = { stage: stg, ...plot };
+  updateInfo(plot, stg);
+  render();
+}
+
+/* ═══════════════════════════════ RENDER ════════════════════════════ */
+async function render() {
+  if (!S.selectedPlot) return;
+  const p = S.selectedPlot;
+  showLoading(true);
+
+  const params = new URLSearchParams({
+    point_id:      p.point_id,
+    stage:         p.stage,
+    plot_index:    p.plot_index,
+    year:          S.year || "",
+    view:          S.view,
+    show_polygon:  $("chk-poly").checked  ? "1":"0",
+    show_sam_mask: $("chk-mask").checked  ? "1":"0",
+    zoom:          $("zoom-val").value,
+  });
+  if (p.cluster_id != null) params.set("cluster_id", p.cluster_id);
+
+  try {
+    const data = await apiJSON(`/api/render/plot?${params}`);
+    showImg(data.image);
+  } catch(e) {
+    showErr(e.message);
+  }
+  showLoading(false);
+}
+
+async function renderOverview() {
+  if (!S.pid) return;
+  showLoading(true);
+  S.selectedPlot = null;
+  document.querySelectorAll(".plot-item").forEach(e => e.classList.remove("active"));
+
+  const params = new URLSearchParams({
+    point_id:        S.pid,
+    stage:           S.activeStage,
+    year:            S.year || "",
+    view:            S.view,
+    zoom:            Math.min(18, parseInt($("zoom-val").value) || 18),
+    show_polygon:    $("chk-poly").checked  ? "1":"0",
+    show_sam_mask:   $("chk-mask").checked  ? "1":"0",
+    show_height_val: "1",
+  });
+
+  try {
+    const data = await apiJSON(`/api/render/overview?${params}`);
+    showImg(data.image);
+    updateInfoOverview();
+  } catch(e) {
+    showErr(e.message);
+  }
+  showLoading(false);
+}
+
+function showImg(b64) {
+  resetTransform();
+  const img = $("main-img");
+  img.src = "data:image/png;base64," + b64;
+  img.style.display = "block";
+  $("placeholder").style.display = "none";
+}
+
+function showErr(msg) {
+  $("main-img").style.display = "none";
+  $("placeholder").style.display = "";
+  $("placeholder").textContent = "⚠ " + msg;
+}
+
+/* ═══════════════════════════════ INFO PANEL ════════════════════════ */
+function updateInfo(plot, stage) {
+  const rows = [
+    ["Point",    plot.point_id],
+    ["Stage",    stage],
+    ["Index",    plot.plot_index],
+    ...(plot.cluster_id!=null?[["Cluster", plot.cluster_id]]:[]),
+    ["SAM",      plot.sam_status, plot.sam_status==="success"?"good":"bad"],
+    ["Score",    plot.sam_score!=null?parseFloat(plot.sam_score).toFixed(3):"—"],
+    ["IoU",      plot.sam_iou!=null  ?parseFloat(plot.sam_iou).toFixed(3)  :"—"],
+    ["Area m²",  plot.sam_area_m2!=null?parseFloat(plot.sam_area_m2).toFixed(1):"—"],
+    ...(S.year?[
+      ["Height m",  plot.height_m!=null?parseFloat(plot.height_m).toFixed(2)+"m":"—", plot.height_m!=null?"good":"warn"],
+      ["Class",     plot.height_class||"—", plot.height_class?"good":"warn"],
+      ["Src",       plot.height_src||"—"],
+    ]:[]),
+  ];
+  $("info-content").innerHTML = rows.map(([k,v,c]) =>
+    `<div class="irow"><span class="ik">${k}</span><span class="iv ${c||""}">${v??'—'}</span></div>`
+  ).join("");
+}
+
+function updateInfoOverview() {
+  const all = [...(S.plots.stage1||[]), ...(S.plots.stage2||[])];
+  const wh  = all.filter(p => p.height_m != null).length;
+  const cc  = {};
+  all.forEach(p => { if (p.height_class) cc[p.height_class] = (cc[p.height_class]||0)+1; });
+  let html = `
+    <div class="irow"><span class="ik">Plots</span><span class="iv">${all.length}</span></div>
+    <div class="irow"><span class="ik">With height</span><span class="iv good">${wh}</span></div>`;
+  Object.entries(cc).sort().forEach(([c,n]) => {
+    html += `<div class="irow"><span class="ik" style="font-size:9px">${c}</span><span class="iv" style="color:${hclassColor(c)}">${n}</span></div>`;
+  });
+  $("info-content").innerHTML = html;
+}
+
+/* ═══════════════════════════════ COLORBAR ═══════════════════════════ */
+async function loadColorbar() {
+  if (!S.years.length) return;
+  const data = await apiJSON("/api/colorbar").catch(() => null);
+  if (data && data.image) {
+    $("colorbar-img").src = "data:image/png;base64," + data.image;
+    $("colorbar-img").style.display = "block";
+  }
+  const classes = [
+    ["0-1 storeys","#64d264"],["1-2 storeys","#b4e650"],
+    ["2-3 storeys","#ffe632"],["3-4 storeys","#ffa51e"],
+    ["4-5 storeys","#ff501e"],["5+ storeys","#c81414"],
+  ];
+  $("cls-legend").innerHTML = classes.map(([l,c]) =>
+    `<div class="cls-legend"><div class="cls-swatch" style="background:${c}"></div><span>${l}</span></div>`
+  ).join("");
+}
+
+/* ═══════════════════════════════ LOADING ════════════════════════════ */
+function showLoading(show) {
+  $("loading").style.display = show ? "flex" : "none";
+}
+
+/* ═══════════════════════════════ KEYBOARD NAV ═══════════════════════ */
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    const items = [...document.querySelectorAll(".plot-item")].filter(el => el.style.display !== "none");
+    const idx = items.findIndex(el => el.classList.contains("active"));
+    const next = e.key === "ArrowDown" ? Math.min(idx+1, items.length-1) : Math.max(idx-1, 0);
+    if (items[next]) items[next].click();
+    e.preventDefault();
+  }
+  if (e.key === "Escape") resetTransform();
+});
+
+init();
+</script>
+</body>
+</html>

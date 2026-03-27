@@ -1,0 +1,50 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.so
+
+# ── Virtual environment ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Model weights (large binary files — download separately) ──────────────────
+models/
+
+# ── Pipeline output (generated artifacts) ────────────────────────────────────
+pipeline_output/
+
+# ── ESRI tile cache (downloaded on demand) ────────────────────────────────────
+esri_vis_cache/
+
+# ── Regional map tiles (large image assets — manage outside git) ──────────────
+regional_data/
+
+
+data/
+
+# ── OSM shapefile data (large, download separately) ───────────────────────────
+OSM_data/
+
+# ── Jupyter notebook checkpoints ─────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+
+# ── OS / editor noise ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
