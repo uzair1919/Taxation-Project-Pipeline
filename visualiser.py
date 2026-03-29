@@ -82,10 +82,20 @@ def handle_exception(e):
 def _load_excel(excel_path: Path) -> None:
     global _DF_POINTS, _DF_STAGE1, _DF_STAGE2, _HEIGHT_YEARS
 
-    logger.info(f"Loading Excel: {excel_path}")
-    _DF_POINTS = pd.read_excel(excel_path, sheet_name="points")
-    _DF_STAGE1 = pd.read_excel(excel_path, sheet_name="plots_stage1")
-    _DF_STAGE2 = pd.read_excel(excel_path, sheet_name="plots_stage2")
+    excel_path = Path(excel_path)
+    if not excel_path.exists():
+        raise FileNotFoundError(f"Excel file not found: {excel_path}")
+    size = excel_path.stat().st_size
+    if size == 0:
+        raise ValueError(
+            f"Excel file is empty (0 bytes): {excel_path}\n"
+            "The pipeline likely failed for all points. "
+            "Check pipeline.log and per-point error.txt files for the root cause."
+        )
+    logger.info(f"Loading Excel: {excel_path}  ({size // 1024} KB)")
+    _DF_POINTS = pd.read_excel(excel_path, sheet_name="points",       engine="openpyxl")
+    _DF_STAGE1 = pd.read_excel(excel_path, sheet_name="plots_stage1", engine="openpyxl")
+    _DF_STAGE2 = pd.read_excel(excel_path, sheet_name="plots_stage2", engine="openpyxl")
 
     years = set()
     for col in _DF_STAGE1.columns:

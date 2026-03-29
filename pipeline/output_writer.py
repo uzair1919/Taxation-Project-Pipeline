@@ -140,6 +140,22 @@ def write_final_excel(
     all_stage1 = [rec for pr in point_results for rec in pr.stage1_plots]
     all_stage2 = [rec for pr in point_results for rec in pr.stage2_plots]
 
+    n_failed = sum(1 for pr in point_results if getattr(pr, "status", "") == "error")
+    if n_failed:
+        failed_ids = [getattr(pr, "point_id", "?") for pr in point_results
+                      if getattr(pr, "status", "") == "error"]
+        logger.warning(
+            f"{n_failed}/{len(point_results)} point(s) failed refinement and produced no plots: "
+            + ", ".join(failed_ids)
+        )
+
+    if not all_stage1 and not all_stage2:
+        logger.error(
+            "OUTPUT IS EMPTY — no plot records exist for any point. "
+            "All points likely failed during refinement. "
+            "Check the pipeline.log and per-point error.txt files for the root cause."
+        )
+
     logger.info(
         f"Writing Excel → {output_path}  "
         f"({len(all_stage1)} stage1 rows, {len(all_stage2)} stage2 rows)"

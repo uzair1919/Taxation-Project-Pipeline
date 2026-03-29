@@ -51,12 +51,12 @@ class BHEPredictor(object):
                     pred, rseg, seg = self.model(feature, mask)
             else:
                 pred, rseg, seg = self.model(feature, mask)
-            pred = pred.cpu().numpy()[0, 0]
+            pred = pred.float().cpu().numpy()[0, 0]
 
             from ..process.utils import recover_label
             pred = recover_label(pred)
-            
-            seg = seg.squeeze().cpu().numpy()
+
+            seg = seg.float().squeeze().cpu().numpy()
             pred = Image.fromarray(pred)
             output_path = opj(output_dir, f'{subject[:-4]}_pred.tif')
             pred.save(output_path, format='TIFF', save_all=True)

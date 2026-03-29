@@ -165,27 +165,29 @@ def _polygon_to_mask_128(
 
 
 def _extract_height_from_raster(
-    pred_arr: np.ndarray,    # (128, 128) height raster
-    mask:     np.ndarray,    # (128, 128) binary mask
+    pred_arr:    np.ndarray,    # (128, 128) height raster
+    mask:        np.ndarray,    # (128, 128) binary mask
+    aggregation: str = "median",
 ) -> Tuple[Optional[float], int]:
     """
-    Extract median height from pred_arr within the binary mask.
-    Returns (median_height_m, n_pixels) or (None, 0).
+    Aggregate height pixels within the binary mask.
+    Returns (height_m, n_pixels) or (None, 0).
 
-    Median is used instead of mean because edge pixels and shadow/no-data
-    pixels produce low outliers that pull the mean toward lower classes.
-    Median is robust to these tails and picks the dominant height in the mask.
+    aggregation — "median" (default, robust to edge/shadow outliers)
+                  "mean"   (arithmetic average)
     """
     if mask is None or mask.sum() == 0:
         return None, 0
+
+    agg = np.median if aggregation == "median" else np.mean
 
     vals = pred_arr[mask > 0]
     # Exclude zero-height pixels (likely no-data) if there are non-zero ones
     nonzero = vals[vals > 0]
     if len(nonzero) > 0:
-        return float(np.median(nonzero)), int(len(nonzero))
+        return float(agg(nonzero)), int(len(nonzero))
     elif len(vals) > 0:
-        return float(np.median(vals)), int(len(vals))
+        return float(agg(vals)), int(len(vals))
     return None, 0
 
 
@@ -243,7 +245,7 @@ def _run_inference(
         predictor.predict(str(data_dir), subjects, str(out_dir))
     except Exception as exc:
         logger.error(f"BHEPredictor.predict failed: {exc}")
-        logger.debug(traceback.format_exc())
+        logger.error(traceback.format_exc())
         return None
 
     pred_path = out_dir / f"img_{point_id}_pred.tif"
@@ -451,8 +453,9 @@ class HeightRunner:
                 )
                 continue
 
+            aggregation = str(getattr(self.cfg, "HEIGHT_AGGREGATION", "median")).lower()
             height_m, n_px, source = self._extract_plot_height(
-                rec, pred_arr, bbox_wgs84
+                rec, pred_arr, bbox_wgs84, aggregation
             )
 
             if height_m is not None:
@@ -483,9 +486,10 @@ class HeightRunner:
 
     def _extract_plot_height(
         self,
-        rec,            # PlotRecord
-        pred_arr: np.ndarray,
-        bbox_wgs84: Tuple,
+        rec,             # PlotRecord
+        pred_arr:    np.ndarray,
+        bbox_wgs84:  Tuple,
+        aggregation: str = "median",
     ) -> Tuple[Optional[float], int, str]:
         """
         Extract height for one plot.  Returns (height_m, n_pixels, source).
@@ -502,14 +506,14 @@ class HeightRunner:
             if mask_geo_wkt:
                 mask = _polygon_to_mask_128(mask_geo_wkt, bbox_wgs84)
                 if mask is not None and mask.sum() > 0:
-                    height_m, n_px = _extract_height_from_raster(pred_arr, mask)
+                    height_m, n_px = _extract_height_from_raster(pred_arr, mask, aggregation)
                     if height_m is not None:
                         return height_m, n_px, "sam_mask"
 
         # Fallback: rasterise the refined polygon WKT
         mask = _polygon_to_mask_128(rec.polygon_wkt, bbox_wgs84)
         if mask is not None and mask.sum() > 0:
-            height_m, n_px = _extract_height_from_raster(pred_arr, mask)
+            height_m, n_px = _extract_height_from_raster(pred_arr, mask, aggregation)
             if height_m is not None:
                 return height_m, n_px, "polygon"
 

@@ -301,7 +301,7 @@ class SamRunner:
             return ctx_img, (ctx_west, ctx_south, ctx_east, ctx_north)
         except Exception as exc:
             logger.error(f"[{point_id}/{stage}] ESRI fetch failed: {exc}")
-            logger.debug(traceback.format_exc())
+            logger.error(traceback.format_exc())
             return None, None
 
     def _run_flat(
@@ -338,7 +338,7 @@ class SamRunner:
             _attach_results(prompts, sam_results)
         except Exception as exc:
             logger.error(f"[{point_id}/{stage}] SAM inference failed: {exc}")
-            logger.debug(traceback.format_exc())
+            logger.error(traceback.format_exc())
             _mark_skipped(records, f"SAM inference error: {exc}")
 
     def _run_stage2(

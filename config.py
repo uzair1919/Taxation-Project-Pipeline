@@ -256,6 +256,12 @@ SAVE_HEIGHT_PRED_TIFS = True
 # Suppress per-month satellite download logs.
 HEIGHT_VERBOSE = True
  
+# ── Height aggregation method ────────────────────────────────────────────────
+# How pixel heights within the plot mask are aggregated into a single value.
+# "median" — robust to edge/shadow outliers (recommended for noisy masks)
+# "mean"   — arithmetic average; sensitive to outliers but unbiased on clean masks
+HEIGHT_AGGREGATION = "median"
+
 # ── Height-to-storey classification thresholds ───────────────────────────────
 # Format: list of (min_height_m, max_height_m, label) tuples.
 # Ranges are half-open: [min, max).  The last entry catches everything above.

@@ -231,7 +231,7 @@ def process_point(
         )
     except Exception as exc:
         logger.error(f"[{point_id}] SAM failed: {exc}")
-        logger.debug(traceback.format_exc())
+        logger.error(traceback.format_exc())
         from pipeline.sam_bridge import _mark_skipped
         _mark_skipped(point_result.stage1_plots, f"SAM crash: {exc}")
         _mark_skipped(point_result.stage2_plots, f"SAM crash: {exc}")
@@ -267,7 +267,7 @@ def process_point(
                 )
             except Exception as exc:
                 logger.error(f"[{point_id}] Height estimation failed: {exc}")
-                logger.debug(traceback.format_exc())
+                logger.error(traceback.format_exc())
 
     total_elapsed = time.time() - t_sam + ref_elapsed
     logger.info(f"[{point_id}] ✓ Complete ({total_elapsed:.0f}s total)")
@@ -280,12 +280,24 @@ def process_point(
 
 def _write_excel_safe(
     results: list, path: Path, debug_mode: bool, height_years: list | None = None
-) -> None:
+) -> bool:
+    """Write Excel. Returns True on success, False on failure. Never raises."""
+    if not results:
+        return True
     try:
         write_final_excel(results, path, debug_mode=debug_mode, height_years=height_years)
+        return True
     except Exception as exc:
         logger.error(f"Excel write failed: {exc}")
-        logger.debug(traceback.format_exc())
+        logger.error(traceback.format_exc())
+        # Attempt to write to a fallback path so partial results are never lost
+        try:
+            fallback = path.with_name(path.stem + "_recovery.xlsx")
+            write_final_excel(results, fallback, debug_mode=False, height_years=height_years)
+            logger.warning(f"Recovery Excel written to: {fallback}")
+        except Exception:
+            pass
+        return False
 
 
 # =============================================================================
@@ -305,14 +317,21 @@ def run_batch(
 ) -> None:
 
     _setup_logging(output_dir)
-    df      = _load_points(points_csv)
+
+    # ── Load input CSV ────────────────────────────────────────────────────
+    try:
+        df = _load_points(points_csv)
+    except Exception as exc:
+        logger.error(f"Cannot load points CSV '{points_csv}': {exc}")
+        sys.exit(1)
     n_total = len(df)
 
     checkpoint = CheckpointManager(output_dir)
     if reset_checkpoint:
         checkpoint.reset()
 
-    excel_path = output_dir / getattr(cfg, "FINAL_EXCEL_NAME", "final_dataset.xlsx")
+    excel_path     = output_dir / getattr(cfg, "FINAL_EXCEL_NAME", "final_dataset.xlsx")
+    height_years_l = list(getattr(cfg, "HEIGHT_YEARS", []))
 
     logger.info("=" * 70)
     logger.info("  Integrated Plot Boundary Pipeline")
@@ -343,25 +362,60 @@ def run_batch(
 
     all_results: list[PointResult] = []
     n_ok = n_err = n_skip = 0
-    checkpoint_every = int(getattr(cfg, "CHECKPOINT_EVERY_N", 5))
 
-    sam_runner     = SamRunner(cfg)
-    height_runner  = None
-    height_years_l = list(getattr(cfg, "HEIGHT_YEARS", []))
-    if getattr(cfg, "RUN_HEIGHT_ESTIMATION", False) and height_years_l:
-        logger.info(f"Height estimation enabled for years: {height_years_l}")
-        height_runner = HeightRunner(cfg)
+    # Keep runners as None until initialised so the finally block is safe
+    # even if initialisation crashes before the try block is fully entered.
+    sam_runner    = None
+    height_runner = None
 
     try:
+        # ── Initialise heavy components inside try so finally always saves ──
+        try:
+            sam_runner = SamRunner(cfg)
+        except Exception as exc:
+            logger.error(f"SAM runner failed to initialise: {exc}")
+            logger.error(traceback.format_exc())
+            logger.error("Cannot continue without SAM — aborting.")
+            return   # finally block still runs; all_results is empty so no write
+
+        if getattr(cfg, "RUN_HEIGHT_ESTIMATION", False) and height_years_l:
+            logger.info(f"Height estimation enabled for years: {height_years_l}")
+            try:
+                height_runner = HeightRunner(cfg)
+            except Exception as exc:
+                logger.error(f"Height runner failed to initialise: {exc}")
+                logger.error(traceback.format_exc())
+                logger.warning("Continuing WITHOUT height estimation for this run.")
+                height_runner = None
+
+        # ── Register SIGTERM handler so Linux kill/OOM still saves Excel ────
+        import signal as _signal
+        def _sigterm_handler(signum, frame):
+            logger.warning("SIGTERM received — saving Excel and exiting …")
+            if all_results:
+                _write_excel_safe(all_results, excel_path, debug_mode, height_years_l)
+            sys.exit(0)
+        try:
+            _signal.signal(_signal.SIGTERM, _sigterm_handler)
+        except Exception:
+            pass   # not available on all platforms; non-fatal
+
         import time as _time
         for i, row in df.iterrows():
-            point_id      = str(row["point_id"]).strip()
-            name          = str(row.get("name", point_id)).strip()
-            lat           = float(row["latitude"])
-            lon           = float(row["longitude"])
-            out_dir_point = _point_dir(output_dir, point_id, name)
+            # ── Parse row — skip malformed rows rather than crashing ─────
+            try:
+                point_id = str(row["point_id"]).strip()
+                name     = str(row.get("name", row["point_id"])).strip()
+                lat      = float(row["latitude"])
+                lon      = float(row["longitude"])
+            except Exception as exc:
+                logger.error(f"Row {i}: cannot parse — {exc} — skipping")
+                n_err += 1
+                continue
 
-            remaining = n_total - (i + 1)
+            out_dir_point = _point_dir(output_dir, point_id, name)
+            remaining     = n_total - (i + 1)
+
             logger.info("")
             logger.info(f"─── Point {i+1}/{n_total}  {point_id} — {name} ───")
 
@@ -395,25 +449,39 @@ def run_batch(
                 })
                 logger.info(
                     f"[{point_id}] ✓ OK  ({elapsed:.0f}s)  —  "
-                    f"batch progress: {n_ok} ok, {n_err} failed, {n_skip} skipped  |  {remaining} remaining"
+                    f"batch progress: {n_ok} ok, {n_err} failed, {n_skip} skipped"
+                    f"  |  {remaining} remaining"
                 )
             else:
                 n_err += 1
                 checkpoint.mark_failed(point_id, point_result.error or "unknown")
                 logger.warning(
                     f"[{point_id}] ✗ FAILED  ({elapsed:.0f}s)  —  "
-                    f"batch progress: {n_ok} ok, {n_err} failed, {n_skip} skipped  |  {remaining} remaining"
+                    f"batch progress: {n_ok} ok, {n_err} failed, {n_skip} skipped"
+                    f"  |  {remaining} remaining"
                 )
 
-            # Periodic save
-            if len(all_results) % checkpoint_every == 0:
-                logger.info(f"Saving intermediate Excel ({len(all_results)} points) …")
-                _write_excel_safe(all_results, excel_path, debug_mode, height_years_l)
+            # Save Excel after every single point so a crash never loses completed work
+            _write_excel_safe(all_results, excel_path, debug_mode, height_years_l)
 
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user (Ctrl+C) — saving progress and exiting …")
+    except Exception as exc:
+        logger.error(f"Unexpected batch-level error: {exc}")
+        logger.error(traceback.format_exc())
     finally:
-        sam_runner.close()
+        if sam_runner is not None:
+            try:
+                sam_runner.close()
+            except Exception:
+                pass
         if height_runner is not None:
-            height_runner.close()
+            try:
+                height_runner.close()
+            except Exception:
+                pass
+        # Final write guarantees the last point is saved even if the loop
+        # was interrupted between the per-point write and the next iteration.
         if all_results:
             _write_excel_safe(all_results, excel_path, debug_mode, height_years_l)
 
@@ -448,6 +516,7 @@ def run_single(
 
     out_dir_point = _point_dir(output_dir, point_id, name)
     excel_path    = output_dir / getattr(cfg, "FINAL_EXCEL_NAME", "final_dataset.xlsx")
+    result        = None
     try:
         result = process_point(
             lat=lat, lon=lon,
@@ -459,12 +528,19 @@ def run_single(
             debug_mode=debug_mode,
             verbose=verbose,
         )
-        _write_excel_safe([result], excel_path, debug_mode, height_years_l)
-        logger.info(f"Done. Excel → {excel_path.resolve()}")
     finally:
-        sam_runner.close()
+        try:
+            sam_runner.close()
+        except Exception:
+            pass
         if height_runner is not None:
-            height_runner.close()
+            try:
+                height_runner.close()
+            except Exception:
+                pass
+        if result is not None:
+            _write_excel_safe([result], excel_path, debug_mode, height_years_l)
+            logger.info(f"Done. Excel → {excel_path.resolve()}")
 
 
 # =============================================================================

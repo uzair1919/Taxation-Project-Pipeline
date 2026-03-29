@@ -14,10 +14,13 @@ Changes in this version
 from __future__ import annotations
 
 import json
+import logging
 import os
 import traceback
 import warnings
 from dataclasses import dataclass, field
+
+logger = logging.getLogger("pipeline.refinement")
 from typing import List, Optional
 
 import geopandas as gpd
@@ -377,8 +380,8 @@ def run_refinement(
 
     except Exception as exc:
         error_msg = str(exc)
-        print(f"\n  [{point_id}] REFINEMENT ERROR: {exc}")
-        print(traceback.format_exc())
+        logger.error(f"[{point_id}] REFINEMENT ERROR: {exc}")
+        logger.error(traceback.format_exc())
         with open(os.path.join(out_dir, "error.txt"), "w") as f:
             f.write(traceback.format_exc())
 
