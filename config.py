@@ -170,7 +170,7 @@ RUN_SAM_STAGE2 = True   # run SAM on stage-2 (per-cluster refined) polygons
 #  PIPELINE BEHAVIOUR
 # ─────────────────────────────────────────────────────────────────────────────
 
-CHECKPOINT_EVERY_N = 5   # write intermediate Excel every N points
+CHECKPOINT_EVERY_N = 1   # write intermediate Excel every N points
 
 # Add debug_info sheet to Excel with per-point/cluster intermediate stats.
 DEBUG_EXCEL = False
@@ -186,7 +186,7 @@ RUN_HEIGHT_ESTIMATION = True
 # Years to estimate building height for.  Each year produces three columns
 # per plot in the Excel: height_m_{year}, height_class_{year}, height_src_{year}.
 # Example: HEIGHT_YEARS = [2022, 2023, 2024]
-HEIGHT_YEARS: list = [2024]
+HEIGHT_YEARS: list = [2023, 2024, 2025]
  
 # Geographic buffer around each GPS point in metres.
 # This defines the area from which S1/S2 imagery is downloaded and the

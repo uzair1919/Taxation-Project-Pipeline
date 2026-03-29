@@ -21,7 +21,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,69 @@ class CheckpointManager:
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
         self._save()
+
+    def mark_excel_written(self, point_id: str) -> None:
+        """Confirm that the Excel was successfully written for this point."""
+        if point_id in self.data["completed"]:
+            self.data["completed"][point_id]["excel_written"] = True
+            self._save()
+
+    def is_complete(
+        self,
+        point_id:        str,
+        cfg:             Any,
+        excel_point_ids: Optional[Set[str]],
+    ) -> Tuple[bool, str]:
+        """
+        Return (should_skip, reason).
+
+        should_skip=True only when every step required by the current config
+        is confirmed done.  Checks performed:
+
+        1. Point is in the completed checkpoint.
+        2. Point data is present in the output Excel
+           (verified via excel_point_ids if the file could be read; falls back
+           to the stored excel_written flag when the file could not be loaded).
+        3. For new-format entries: refinement succeeded, and all years in
+           cfg.HEIGHT_YEARS have recorded height results.
+
+        Legacy entries (written before granular tracking) pass once the Excel
+        presence check is satisfied, so old runs are never silently discarded.
+        """
+        if point_id not in self.data["completed"]:
+            return False, "not yet processed"
+
+        entry = self.data["completed"][point_id]
+
+        # ── 1. Excel presence / write confirmation ───────────────────────
+        if excel_point_ids is not None:
+            # We loaded the Excel successfully — check directly
+            if point_id not in excel_point_ids:
+                return False, "data not found in output Excel"
+        else:
+            # Could not load the Excel — fall back to the stored flag.
+            # For legacy entries the flag is absent; treat as True (optimistic)
+            # so we don't force a full re-run every time the Excel is unreadable.
+            excel_ok = entry.get("excel_written", "refinement_ok" not in entry)
+            if not excel_ok:
+                return False, "Excel write not confirmed and Excel file unreadable"
+
+        # ── 2. Legacy entries pass once Excel presence is satisfied ──────
+        if "refinement_ok" not in entry:
+            return True, "complete (legacy checkpoint entry)"
+
+        # ── 3. Granular checks for new-format entries ────────────────────
+        if not entry.get("refinement_ok", False):
+            return False, "refinement did not complete successfully"
+
+        if getattr(cfg, "RUN_HEIGHT_ESTIMATION", False):
+            required = {int(y) for y in getattr(cfg, "HEIGHT_YEARS", [])}
+            done     = {int(y) for y in entry.get("height_years_done", [])}
+            missing  = required - done
+            if missing:
+                return False, f"height estimation missing for year(s): {sorted(missing)}"
+
+        return True, "all steps complete"
 
     def reset(self) -> None:
         """Wipe all checkpoint state (use with --reset-checkpoint)."""

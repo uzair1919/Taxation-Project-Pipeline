@@ -363,6 +363,27 @@ def run_batch(
     all_results: list[PointResult] = []
     n_ok = n_err = n_skip = 0
 
+    # ── Load existing Excel once for skip-existing verification ──────────
+    # excel_snapshot: set of point_ids already in the Excel, or None if
+    # the file does not exist / could not be read.
+    excel_snapshot: set | None = None
+    if skip_existing and excel_path.exists():
+        try:
+            _df_ex = pd.read_excel(excel_path, sheet_name="points", engine="openpyxl")
+            excel_snapshot = {
+                str(v).strip() for v in _df_ex["point_id"].dropna()
+            }
+            logger.info(
+                f"Existing Excel loaded for verification: "
+                f"{len(excel_snapshot)} point(s) with data"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Could not read existing Excel for skip verification ({exc}). "
+                "Falling back to checkpoint flags — points whose Excel write was "
+                "not confirmed will be re-run."
+            )
+
     # Keep runners as None until initialised so the finally block is safe
     # even if initialisation crashes before the try block is fully entered.
     sam_runner    = None
@@ -419,10 +440,19 @@ def run_batch(
             logger.info("")
             logger.info(f"─── Point {i+1}/{n_total}  {point_id} — {name} ───")
 
-            if skip_existing and checkpoint.is_done(point_id):
-                logger.info(f"[{point_id}] Already completed — skipping  ({remaining} remaining)")
-                n_skip += 1
-                continue
+            if skip_existing:
+                complete, reason = checkpoint.is_complete(
+                    point_id, cfg, excel_snapshot
+                )
+                if complete:
+                    logger.info(
+                        f"[{point_id}] Skipping — {reason}  ({remaining} remaining)"
+                    )
+                    n_skip += 1
+                    continue
+                elif checkpoint.is_done(point_id):
+                    # Was marked done in a previous run but something is missing
+                    logger.info(f"[{point_id}] Re-running — {reason}")
 
             t_start = _time.time()
             point_result = process_point(
@@ -439,13 +469,36 @@ def run_batch(
 
             all_results.append(point_result)
 
+            # ── Compute granular step completion from the result ──────────
+            all_plots = list(point_result.stage1_plots) + list(point_result.stage2_plots)
+            refinement_ok = point_result.status == "ok"
+
+            # A year is "done" if at least one plot has a non-None height value.
+            # If there are no plots the point is trivially done for all years
+            # (nothing to estimate height for).
+            if all_plots:
+                height_years_done = [
+                    year for year in height_years_l
+                    if any(
+                        hasattr(r, "height_results")
+                        and r.height_results is not None
+                        and r.height_results.get(year) is not None
+                        and r.height_results[year].height_m is not None
+                        for r in all_plots
+                    )
+                ]
+            else:
+                height_years_done = list(height_years_l)
+
             if point_result.status == "ok":
                 n_ok += 1
                 checkpoint.mark_done(point_id, {
-                    "status":         "ok",
-                    "n_stage1_plots": point_result.n_stage1_plots,
-                    "n_stage2_plots": point_result.n_stage2_plots,
-                    "n_clusters":     point_result.n_clusters,
+                    "refinement_ok":    refinement_ok,
+                    "n_stage1_plots":   point_result.n_stage1_plots,
+                    "n_stage2_plots":   point_result.n_stage2_plots,
+                    "n_clusters":       point_result.n_clusters,
+                    "height_years_done": height_years_done,
+                    "excel_written":    False,   # updated below on successful write
                 })
                 logger.info(
                     f"[{point_id}] ✓ OK  ({elapsed:.0f}s)  —  "
@@ -462,7 +515,12 @@ def run_batch(
                 )
 
             # Save Excel after every single point so a crash never loses completed work
-            _write_excel_safe(all_results, excel_path, debug_mode, height_years_l)
+            write_ok = _write_excel_safe(all_results, excel_path, debug_mode, height_years_l)
+            if write_ok and point_result.status == "ok":
+                checkpoint.mark_excel_written(point_id)
+                # Keep snapshot in sync so subsequent skip checks see this point
+                if excel_snapshot is not None:
+                    excel_snapshot.add(point_id)
 
     except KeyboardInterrupt:
         logger.warning("Interrupted by user (Ctrl+C) — saving progress and exiting …")
