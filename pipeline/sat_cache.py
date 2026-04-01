@@ -84,13 +84,19 @@ def _snap(lat: float, lon: float, buffer_m: float) -> Tuple[float, float]:
     Snap (lat, lon) to the nearest node of a regular geographic grid whose
     cell spacing equals buffer_m.
 
-    The longitude step is derived from cos(lat) so the physical cell is
-    approximately square.  Within a single survey region variation is tiny.
+    Latitude is snapped first.  The longitude step is then derived from the
+    SNAPPED latitude, not the raw one.  This guarantees that any two nearby
+    points which share the same snapped latitude will compute an identical
+    step_lon and therefore an identical snapped longitude — even if their
+    raw latitudes differ slightly.  Without this, multiplying different
+    per-point step_lon values by the same large grid index (~11 000) would
+    produce tile_id strings that diverge by tens of metres.
     """
     step_lat = buffer_m / 111_320.0
-    step_lon = buffer_m / (111_320.0 * math.cos(math.radians(lat)))
-    s_lat = round(lat / step_lat) * step_lat
-    s_lon = round(lon / step_lon) * step_lon
+    s_lat    = round(lat / step_lat) * step_lat
+    # Use s_lat (common for all nearby points) — not raw lat
+    step_lon = buffer_m / (111_320.0 * math.cos(math.radians(s_lat)))
+    s_lon    = round(lon / step_lon) * step_lon
     return s_lat, s_lon
 
 
