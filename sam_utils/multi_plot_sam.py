@@ -308,14 +308,6 @@ class MultiPlotSAM2:
             for px_x, px_y in corners_orig
         ]
 
-        deg_per_px_lon = (ctx_east  - ctx_west)  / w
-        deg_per_px_lat = (ctx_north - ctx_south) / h
-        area_m2 = (
-            float(np.sum(mask_binary))
-            * (deg_per_px_lon * 96_000)
-            * (deg_per_px_lat * 111_000)
-        )
-
         gt_mask = np.zeros((h, w), dtype=np.uint8)
         pts = np.array(polygon_px, dtype=np.int32)
         if len(pts) >= 3:
@@ -336,6 +328,27 @@ class MultiPlotSAM2:
         mask_geo_wkt = self._mask_to_geo_polygon(
             mask_binary, ctx_west, ctx_south, ctx_east, ctx_north
         )
+
+        # Geodesic area on the WGS84 ellipsoid — consistent with plot_area_m2
+        try:
+            from pyproj import Geod
+            from shapely import wkt as shapely_wkt
+            _geod    = Geod(ellps="WGS84")
+            _polygon = shapely_wkt.loads(mask_geo_wkt)
+            area_m2, _ = _geod.geometry_area_perimeter(_polygon)
+            area_m2  = abs(area_m2)
+        except Exception:
+            # Fallback: flat-earth pixel estimate if shapely/pyproj unavailable
+            deg_per_px_lon = (ctx_east  - ctx_west)  / w
+            deg_per_px_lat = (ctx_north - ctx_south) / h
+            import math as _math
+            ctr_lat        = (ctx_south + ctx_north) / 2.0
+            m_per_deg_lon  = 111_320.0 * _math.cos(_math.radians(ctr_lat))
+            area_m2 = (
+                float(np.sum(mask_binary))
+                * (deg_per_px_lon * m_per_deg_lon)
+                * (deg_per_px_lat * 111_320.0)
+            )
 
         return {
             "plot_id":            plot_id,

@@ -33,19 +33,19 @@ FINAL_EXCEL_NAME   = "final_dataset.xlsx"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Refinement diagnostic plots (stage1_utm.png, stage1_satellite.png, etc.)
-SAVE_REFINEMENT_PLOTS = True
+SAVE_REFINEMENT_PLOTS = False
 
 # GeoJSON files for each point (stage1_plots.geojson, stage2_plots.geojson)
-SAVE_GEOJSON = True
+SAVE_GEOJSON = False
 
 # SAM .npy binary mask files (one per plot, referenced by mask_path in Excel)
-SAVE_SAM_MASKS = True
+SAVE_SAM_MASKS = False
 
 # SAM translucent overlay PNGs (visualisation only)
-SAVE_SAM_OVERLAYS = True
+SAVE_SAM_OVERLAYS = False
 
 # ESRI context images fetched for SAM inference
-SAVE_SAM_CONTEXT_IMAGES = True
+SAVE_SAM_CONTEXT_IMAGES = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  VERBOSITY
@@ -263,11 +263,11 @@ MIN_HEIGHT_MONTHS = 3   # out of 12 months; 3 is a reasonable minimum
 # Keep S1/S2 satellite TIF files after inference.
 # If False, they are written to a temp dir and deleted immediately.
 # Keeping them speeds up re-runs (files are skipped if they already exist).
-SAVE_HEIGHT_SAT_DATA = True
+SAVE_HEIGHT_SAT_DATA = False
  
 # Keep the T-SwinUNet _pred.tif height rasters.
 # These are small (128×128, ~64 KB each) and useful for visual inspection.
-SAVE_HEIGHT_PRED_TIFS = True
+SAVE_HEIGHT_PRED_TIFS = False
  
 # Suppress per-month satellite download logs.
 HEIGHT_VERBOSE = True
