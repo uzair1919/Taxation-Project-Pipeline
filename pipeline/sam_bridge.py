@@ -115,7 +115,11 @@ def _build_prompts(
 
 
 def _attach_results(prompts: list, sam_results: list) -> None:
-    """Write SamResult back onto each PlotRecord referenced in prompts."""
+    """Write SamResult back onto each PlotRecord referenced in prompts.
+
+    Results from segment_multiple_plots are returned in angle-group order
+    (not the original prompt order), so we match by plot_id, not by position.
+    """
     from pipeline.utils.geo import bbox_corners_to_wkt
 
     if len(prompts) != len(sam_results):
@@ -125,8 +129,25 @@ def _attach_results(prompts: list, sam_results: list) -> None:
             "some records will be missing SAM results"
         )
 
-    for prompt, res in zip(prompts, sam_results):
+    # Key by plot_id to survive angle-group reordering
+    results_by_id = {r.get("plot_id"): r for r in sam_results if r.get("plot_id")}
+
+    for prompt in prompts:
         rec = prompt["_record_ref"]
+        res = results_by_id.get(prompt["plot_id"])
+
+        if res is None:
+            logger.warning(
+                f"No SAM result found for plot_id={prompt['plot_id']} — marking failed"
+            )
+            rec.sam_result = SamResult(
+                status="failed",
+                error="result missing after angle-group processing",
+                mask_geo_wkt="", mask_path="",
+                sam_bbox_wkt="", sam_score=0.0, sam_iou=0.0,
+                sam_area_m2=0.0, rotation_angle_deg=0.0,
+            )
+            continue
 
         if res.get("status") != "success":
             rec.sam_result = SamResult(

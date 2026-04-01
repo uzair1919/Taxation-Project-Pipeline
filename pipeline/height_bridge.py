@@ -284,6 +284,7 @@ class HeightRunner:
         self.cfg        = cfg
         self._predictor = None   # lazy-loaded
         self._fetcher   = None
+        self._sat_cache = None   # SatelliteCache | None
 
     # ------------------------------------------------------------------
     # Public
@@ -375,6 +376,14 @@ class HeightRunner:
             verbose     = bool(getattr(cfg, "HEIGHT_VERBOSE", True)),
         )
 
+        # Satellite tile cache (optional — controlled by SAT_CACHE_ENABLED)
+        if getattr(cfg, "SAT_CACHE_ENABLED", False):
+            from pipeline.sat_cache import SatelliteCache
+            cache_dir = Path(getattr(cfg, "SAT_CACHE_DIR", "sat_cache"))
+            buffer_m  = float(getattr(cfg, "HEIGHT_BUFFER_M", 640.0))
+            self._sat_cache = SatelliteCache(cache_dir, buffer_m)
+            logger.info(f"Satellite tile cache enabled → {cache_dir.resolve()}")
+
     def _process_year(
         self,
         point_result,
@@ -383,34 +392,91 @@ class HeightRunner:
         out_dir:    Path,
     ) -> None:
         """Run one year of height estimation for all plots in point_result."""
-        point_id = point_result.point_id
-        save_sat = bool(getattr(self.cfg, "SAVE_HEIGHT_SAT_DATA",  False))
+        point_id  = point_result.point_id
+        save_sat  = bool(getattr(self.cfg, "SAVE_HEIGHT_SAT_DATA",  False))
         save_pred = bool(getattr(self.cfg, "SAVE_HEIGHT_PRED_TIFS", False))
+        cache     = self._sat_cache   # SatelliteCache | None
 
-        # ── 1. Satellite data directory ───────────────────────────────────
-        if save_sat:
-            sat_dir = out_dir / "height" / str(year) / "sat"
+        # ── 0. Determine working bbox ─────────────────────────────────────
+        # When the tile cache is on we anchor every download to the snapped
+        # grid-cell centre so nearby points share the same GEE tile.
+        # work_bbox is used for GEE fetching AND for pixel-coordinate mapping
+        # during height extraction — both must use the same bbox.
+        if cache is not None:
+            west, south, east, north = bbox_wgs84
+            ctr_lat = (south + north) / 2.0
+            ctr_lon = (west  + east ) / 2.0
+            tile_id, work_bbox = cache.get_tile_info(ctr_lat, ctr_lon)
         else:
-            # Write to a temp dir; cleaned up at the end of this method
-            _tmp_ctx = tempfile.TemporaryDirectory()
-            sat_dir  = Path(_tmp_ctx.name)
+            tile_id   = None
+            work_bbox = bbox_wgs84   # original per-point bbox; unchanged
 
-        # ── 2. Fetch S1 + S2 ─────────────────────────────────────────────
-        n_s1_real, n_s2_real = self._fetcher.fetch_for_point(
-            point_id   = point_id,
-            bbox_wgs84 = bbox_wgs84,
-            year       = year,
-            out_dir    = sat_dir,
-        )
+        # ── 1. Pred-raster cache hit — skip GEE + GPU inference entirely ──
+        if cache is not None and cache.is_pred_complete(tile_id, year):
+            pred_arr = cache.load_pred(tile_id, year)
+            if pred_arr is not None:
+                n_s1, n_s2 = cache.get_sat_counts(tile_id, year)
+                logger.info(
+                    f"[{point_id}/{year}] Pred cache HIT (tile {tile_id}) "
+                    f"— skipping GEE + GPU inference"
+                )
+                self._attach_heights_to_plots(point_result, pred_arr, work_bbox, year)
+                return
 
+        # ── 2. Satellite data: cache hit or fresh GEE download ────────────
+        _tmp_sat = None   # TemporaryDirectory | None
+
+        if cache is not None and cache.is_sat_complete(tile_id, year):
+            # Sat cache hit: materialise in a temp dir with point_id naming
+            n_s1, n_s2 = cache.get_sat_counts(tile_id, year)
+            logger.info(
+                f"[{point_id}/{year}] Sat cache HIT (tile {tile_id}) "
+                f"— skipping GEE  (S1: {n_s1}/12  S2: {n_s2}/12 real months)"
+            )
+            _tmp_sat = tempfile.TemporaryDirectory()
+            sat_dir  = Path(_tmp_sat.name)
+            cache.prepare_working_dir(tile_id, year, point_id, sat_dir)
+
+        else:
+            # Sat cache miss: download from GEE
+            if save_sat:
+                sat_dir = out_dir / "height" / str(year) / "sat"
+            else:
+                _tmp_sat = tempfile.TemporaryDirectory()
+                sat_dir  = Path(_tmp_sat.name)
+
+            n_s1, n_s2 = self._fetcher.fetch_for_point(
+                point_id   = point_id,
+                bbox_wgs84 = work_bbox,
+                year       = year,
+                out_dir    = sat_dir,
+            )
+
+            # Persist to tile cache so future nearby points skip GEE
+            if cache is not None:
+                try:
+                    cache.save_sat_from_dir(
+                        tile_id    = tile_id,
+                        year       = year,
+                        src_dir    = sat_dir,
+                        point_id   = point_id,
+                        n_s1_real  = n_s1,
+                        n_s2_real  = n_s2,
+                        bbox_wgs84 = work_bbox,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"[{point_id}/{year}] Sat cache write failed: {exc}"
+                    )
+
+        # ── 3. Minimum-data gate ──────────────────────────────────────────
         min_months = int(getattr(self.cfg, "MIN_HEIGHT_MONTHS", 3))
-        if n_s1_real < min_months or n_s2_real < min_months:
+        if n_s1 < min_months or n_s2 < min_months:
             logger.warning(
                 f"[{point_id}/{year}] Insufficient satellite data "
-                f"(S1: {n_s1_real}/{12}, S2: {n_s2_real}/{12}, "
+                f"(S1: {n_s1}/{12}, S2: {n_s2}/{12}, "
                 f"minimum required: {min_months}) — skipping inference."
             )
-            # Mark all plots as failed for this year
             all_records = list(point_result.stage1_plots) + list(point_result.stage2_plots)
             for rec in all_records:
                 if not hasattr(rec, "height_results") or rec.height_results is None:
@@ -419,17 +485,17 @@ class HeightRunner:
                     height_m=None, height_class=None, n_pixels=0,
                     source="insufficient_data"
                 )
-            # Cleanup
-            if not save_sat:
-                try: _tmp_ctx.cleanup()
+            if _tmp_sat:
+                try: _tmp_sat.cleanup()
                 except Exception: pass
             return
 
-        # ── 3. Run inference ──────────────────────────────────────────────
+        # ── 4. Run T-SwinUNet inference ───────────────────────────────────
+        _tmp_pred = None
         if save_pred:
             pred_out_dir = out_dir / "height" / str(year) / "pred"
         else:
-            _tmp_pred = tempfile.TemporaryDirectory()
+            _tmp_pred    = tempfile.TemporaryDirectory()
             pred_out_dir = Path(_tmp_pred.name)
 
         pred_arr = _run_inference(
@@ -439,8 +505,46 @@ class HeightRunner:
             out_dir   = pred_out_dir,
         )
 
-        # ── 4. Attach results to each PlotRecord ──────────────────────────
-        thresholds = list(getattr(self.cfg, "HEIGHT_STORY_THRESHOLDS", []))
+        # Persist prediction raster to tile cache
+        if cache is not None and pred_arr is not None:
+            pred_tif = pred_out_dir / f"img_{point_id}_pred.tif"
+            if pred_tif.exists():
+                try:
+                    cache.save_pred(tile_id, year, pred_tif, work_bbox)
+                except Exception as exc:
+                    logger.warning(
+                        f"[{point_id}/{year}] Pred cache write failed: {exc}"
+                    )
+
+        # ── 5. Attach results to PlotRecords ──────────────────────────────
+        self._attach_heights_to_plots(point_result, pred_arr, work_bbox, year)
+
+        # ── 6. Cleanup temp dirs ──────────────────────────────────────────
+        if _tmp_sat:
+            try: _tmp_sat.cleanup()
+            except Exception: pass
+        if _tmp_pred:
+            try: _tmp_pred.cleanup()
+            except Exception: pass
+
+    def _attach_heights_to_plots(
+        self,
+        point_result,
+        pred_arr:    Optional[np.ndarray],
+        bbox_wgs84:  Tuple,
+        year:        int,
+    ) -> None:
+        """
+        Extract per-plot heights from pred_arr and attach HeightYearResult to
+        every PlotRecord in point_result.  Also logs the completion summary.
+
+        pred_arr may be None (inference failed); all plots get source="failed".
+        bbox_wgs84 must be the same bbox used to produce pred_arr so that
+        pixel-coordinate mapping is consistent.
+        """
+        point_id    = point_result.point_id
+        thresholds  = list(getattr(self.cfg, "HEIGHT_STORY_THRESHOLDS", []))
+        aggregation = str(getattr(self.cfg, "HEIGHT_AGGREGATION", "median")).lower()
         all_records = list(point_result.stage1_plots) + list(point_result.stage2_plots)
 
         for rec in all_records:
@@ -453,15 +557,10 @@ class HeightRunner:
                 )
                 continue
 
-            aggregation = str(getattr(self.cfg, "HEIGHT_AGGREGATION", "median")).lower()
             height_m, n_px, source = self._extract_plot_height(
                 rec, pred_arr, bbox_wgs84, aggregation
             )
-
-            if height_m is not None:
-                h_class = classify_height(height_m, thresholds)
-            else:
-                h_class = None
+            h_class = classify_height(height_m, thresholds) if height_m is not None else None
 
             rec.height_results[year] = HeightYearResult(
                 height_m     = round(height_m, 2) if height_m is not None else None,
@@ -470,19 +569,14 @@ class HeightRunner:
                 source       = source,
             )
 
+        n_ok = sum(
+            1 for r in all_records
+            if r.height_results.get(year) and r.height_results[year].height_m is not None
+        )
         logger.info(
             f"[{point_id}/{year}] Height extraction complete — "
-            f"{sum(1 for r in all_records if r.height_results.get(year) and r.height_results[year].height_m is not None)}"
-            f"/{len(all_records)} plots with valid height"
+            f"{n_ok}/{len(all_records)} plots with valid height"
         )
-
-        # ── 5. Cleanup temp dirs ──────────────────────────────────────────
-        if not save_sat:
-            try: _tmp_ctx.cleanup()
-            except Exception: pass
-        if not save_pred:
-            try: _tmp_pred.cleanup()
-            except Exception: pass
 
     def _extract_plot_height(
         self,

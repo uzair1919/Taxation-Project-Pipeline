@@ -33,19 +33,19 @@ FINAL_EXCEL_NAME   = "final_dataset.xlsx"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Refinement diagnostic plots (stage1_utm.png, stage1_satellite.png, etc.)
-SAVE_REFINEMENT_PLOTS = False
+SAVE_REFINEMENT_PLOTS = True
 
 # GeoJSON files for each point (stage1_plots.geojson, stage2_plots.geojson)
-SAVE_GEOJSON = False
+SAVE_GEOJSON = True
 
 # SAM .npy binary mask files (one per plot, referenced by mask_path in Excel)
-SAVE_SAM_MASKS = False
+SAVE_SAM_MASKS = True
 
 # SAM translucent overlay PNGs (visualisation only)
-SAVE_SAM_OVERLAYS = False
+SAVE_SAM_OVERLAYS = True
 
 # ESRI context images fetched for SAM inference
-SAVE_SAM_CONTEXT_IMAGES = False
+SAVE_SAM_CONTEXT_IMAGES = True
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  VERBOSITY
@@ -235,6 +235,22 @@ TSWIN_CONFIG_PATH = BASE_DIR / "tswin_unet" / "configs" / "exp3.yaml"
 # If you have a GEE cloud project, set it here (optional):
 GEE_PROJECT = "ee-mukskhan9999"   # e.g. "my-gee-project-id" or leave as None
  
+# ── Satellite tile cache ──────────────────────────────────────────────────────
+#
+# When enabled, GEE satellite tiles and T-SwinUNet prediction rasters are
+# cached on disk and reused for any future GPS point that falls in the same
+# grid cell (cell size = HEIGHT_BUFFER_M).
+#
+# First point in a cell  → GEE download  + GPU inference  + write to cache
+# Subsequent points      → read from cache, skip GEE + GPU entirely
+#
+# The cache is persistent across runs — starting the pipeline again on the
+# same region immediately hits the cache.  A JSON index
+# (sat_cache/sat_cache_index.json) records which tiles are complete.
+#
+SAT_CACHE_ENABLED = True
+SAT_CACHE_DIR     = BASE_DIR / "sat_cache"
+
 # ── Storage controls ──────────────────────────────────────────────────────────
 
 # Minimum number of months (per sensor) that must have real satellite data
@@ -267,10 +283,10 @@ HEIGHT_AGGREGATION = "median"
 # Ranges are half-open: [min, max).  The last entry catches everything above.
 # These are based on ~3m floor-to-ceiling height.  Adjust for your region.
 HEIGHT_STORY_THRESHOLDS = [
-    (0.0,   3.0,  "0-1 storeys"),
-    (3.0,   6.0,  "1-2 storeys"),
-    (6.0,   9.0,  "2-3 storeys"),
-    (9.0,  12.0,  "3-4 storeys"),
-    (12.0, 15.0,  "4-5 storeys"),
-    (15.0, 999.0, "5+ storeys"),
+    (0.0,   1.0,  "0 storey"),
+    (1.0,   2.0,  "1 storey"),
+    (2.0,   3.0,  "2 storeys"),
+    (3.0,   5.0,  "3-5 storeys"),
+    (5.0,  10.0,  "5-15 storeys"),
+    (10.0, 999.0, "15+ storeys"),
 ]

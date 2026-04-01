@@ -366,9 +366,12 @@ class MultiPlotSAM2:
         img     = np.array(context_img.copy())
         overlay = img.copy()
 
-        for i, (prompt, res) in enumerate(zip(prompts, results)):
+        # Match results by plot_id — results are in angle-group order, not prompt order
+        results_by_id = {r.get("plot_id"): r for r in results if r.get("plot_id")}
+        for i, prompt in enumerate(prompts):
             color      = self._get_color(i)
             polygon_px = prompt.get("polygon_px", [])
+            res        = results_by_id.get(prompt.get("plot_id"), {})
             if len(polygon_px) >= 3:
                 pts = np.array(polygon_px, dtype=np.int32)
                 cv2.polylines(overlay, [pts], isClosed=True,
