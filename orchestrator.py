@@ -514,8 +514,11 @@ def run_batch(
                     f"  |  {remaining} remaining"
                 )
 
-            # Save Excel after every single point so a crash never loses completed work
-            write_ok = _write_excel_safe(all_results, excel_path, debug_mode, height_years_l)
+            # Save Excel after every single point so a crash never loses completed work.
+            # Pass only the current point's result — the merge logic in write_final_excel
+            # will read the existing file and append just this point's rows, avoiding the
+            # O(n²) behaviour of rewriting all accumulated results on every iteration.
+            write_ok = _write_excel_safe([point_result], excel_path, debug_mode, height_years_l)
             if write_ok and point_result.status == "ok":
                 checkpoint.mark_excel_written(point_id)
                 # Keep snapshot in sync so subsequent skip checks see this point
