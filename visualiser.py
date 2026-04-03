@@ -63,6 +63,8 @@ _DF_STAGE1:   Optional[pd.DataFrame] = None
 _DF_STAGE2:   Optional[pd.DataFrame] = None
 _HEIGHT_YEARS: list = []
 _ESRI_FETCHER = None
+_SAT_CACHE = None
+_SAT_CACHE_INIT = False
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +125,34 @@ def _get_esri():
         except Exception as exc:
             logger.warning(f"Could not load ESRITileFetcher: {exc}")
     return _ESRI_FETCHER
+
+
+def _get_sat_cache():
+    """Lazy-load the SatelliteCache.  Returns None if unavailable."""
+    global _SAT_CACHE, _SAT_CACHE_INIT
+    if _SAT_CACHE_INIT:
+        return _SAT_CACHE
+    _SAT_CACHE_INIT = True
+    try:
+        from pipeline.sat_cache import SatelliteCache
+        try:
+            from config import SAT_CACHE_DIR, HEIGHT_BUFFER_M, SAT_CACHE_ENABLED
+            if not SAT_CACHE_ENABLED:
+                logger.info("SAT_CACHE_ENABLED=False — sat cache disabled in visualiser.")
+                return None
+            cache_dir   = Path(SAT_CACHE_DIR)
+            buffer_m    = float(HEIGHT_BUFFER_M)
+        except Exception:
+            cache_dir  = Path(__file__).parent / "sat_cache"
+            buffer_m   = 640.0
+        if cache_dir.exists():
+            _SAT_CACHE = SatelliteCache(cache_dir, buffer_m)
+            logger.info(f"SatelliteCache loaded from {cache_dir}")
+        else:
+            logger.debug(f"Sat cache dir not found: {cache_dir}")
+    except Exception as exc:
+        logger.warning(f"Could not load SatelliteCache: {exc}")
+    return _SAT_CACHE
 
 
 # ---------------------------------------------------------------------------
@@ -254,79 +284,106 @@ def _class_color(label: Optional[str]) -> Tuple[int, int, int]:
 # ---------------------------------------------------------------------------
 
 def _load_pred_tif(point_id: str, year: int) -> Optional[np.ndarray]:
-    """Load 128×128 height prediction raster."""
-    if not _OUTPUT_DIR:
-        return None
-    candidates = list(_OUTPUT_DIR.glob(
-        f"{point_id}_*/height/{year}/pred/img_{point_id}_pred.tif"
-    ))
-    if not candidates:
-        return None
-    try:
-        import tifffile
-        arr = tifffile.imread(str(candidates[0])).astype(np.float32)
-        if arr.ndim == 3:
-            arr = arr[0]
-        return arr
-    except Exception as exc:
-        logger.debug(f"pred tif read failed: {exc}")
-        return None
+    """Load 128×128 height prediction raster.
+    Checks the per-point output directory first, then falls back to sat_cache."""
+    import tifffile
+
+    # 1 — per-point output directory
+    if _OUTPUT_DIR:
+        candidates = list(_OUTPUT_DIR.glob(
+            f"{point_id}_*/height/{year}/pred/img_{point_id}_pred.tif"
+        ))
+        if candidates:
+            try:
+                arr = tifffile.imread(str(candidates[0])).astype(np.float32)
+                if arr.ndim == 3:
+                    arr = arr[0]
+                return arr
+            except Exception as exc:
+                logger.debug(f"pred tif read failed: {exc}")
+
+    # 2 — satellite cache fallback
+    cache = _get_sat_cache()
+    if cache is not None:
+        centre = _get_point_centre(point_id)
+        if centre:
+            lat_c, lon_c = centre
+            tile_id, _ = cache.get_tile_info(lat_c, lon_c)
+            if cache.is_pred_complete(tile_id, year):
+                arr = cache.load_pred(tile_id, year)
+                if arr is not None:
+                    logger.debug(f"pred tif loaded from sat_cache for {point_id}/{year}")
+                    return arr
+
+    return None
 
 
 def _load_sat_rgb(point_id: str, year: int) -> Optional[Tuple[np.ndarray, Tuple]]:
     """
     Load S2 RGB image.
     Returns (rgb_array, bbox_wgs84) or None.
+    Checks the per-point output directory first, then falls back to sat_cache.
     The bbox is read from the GeoTIFF geotransform so it is accurate.
     """
-    if not _OUTPUT_DIR:
-        return None
-    # Try months 3-9 (spring/summer — least cloud in Pakistan)
-    for month in [3, 4, 5, 6, 7, 8, 9, 2, 10, 1, 11, 12]:
-        candidates = list(_OUTPUT_DIR.glob(
-            f"{point_id}_*/height/{year}/sat/S2/img_{point_id}_{month:02d}.tif"
-        ))
-        if not candidates:
-            continue
+    def _read_s2_tif(path) -> Optional[Tuple[np.ndarray, Tuple]]:
+        """Read one S2 TIF → (rgb_uint8, bbox) or None."""
         try:
             import rasterio
-            with rasterio.open(str(candidates[0])) as src:
-                arr = src.read()          # (C, H, W)
-                bounds = src.bounds       # left, bottom, right, top
-                bbox = (bounds.left, bounds.bottom, bounds.right, bounds.top)
-
+            with rasterio.open(str(path)) as src:
+                arr    = src.read()
+                bounds = src.bounds
+                bbox   = (bounds.left, bounds.bottom, bounds.right, bounds.top)
             if arr.shape[0] < 3:
-                continue
-
-            # arr is (C, H, W) where C = [B2, B3, B4, B8, B11]
+                return None
             # True colour: R=B4(ch2), G=B3(ch1), B=B2(ch0)
             r = arr[2].astype(np.float32)
             g = arr[1].astype(np.float32)
             b = arr[0].astype(np.float32)
-
-            # Check if this month has real data (not all zeros)
             if r.max() < 1 and g.max() < 1 and b.max() < 1:
-                continue
-
-            # Percentile stretch for good contrast regardless of DN range
-            p2  = np.percentile(r[r > 0], 2)  if (r > 0).any() else 0
-            p98 = np.percentile(r[r > 0], 98) if (r > 0).any() else 1
-            if p98 <= p2:
-                p2, p98 = r.min(), max(r.max(), p2 + 1)
+                return None  # zero-filled month
 
             def stretch(ch):
-                lo = np.percentile(ch[ch > 0], 2) if (ch > 0).any() else 0
+                lo = np.percentile(ch[ch > 0], 2)  if (ch > 0).any() else 0
                 hi = np.percentile(ch[ch > 0], 98) if (ch > 0).any() else 1
                 if hi <= lo:
                     hi = lo + 1
                 return np.clip((ch - lo) / (hi - lo) * 255, 0, 255).astype(np.uint8)
 
-            rgb = np.stack([stretch(r), stretch(g), stretch(b)], axis=-1)
-            return rgb, bbox
-
+            return np.stack([stretch(r), stretch(g), stretch(b)], axis=-1), bbox
         except Exception as exc:
-            logger.debug(f"sat rgb read failed month {month}: {exc}")
-            continue
+            logger.debug(f"S2 tif read failed ({path}): {exc}")
+            return None
+
+    month_order = [3, 4, 5, 6, 7, 8, 9, 2, 10, 1, 11, 12]
+
+    # 1 — per-point output directory
+    if _OUTPUT_DIR:
+        for month in month_order:
+            candidates = list(_OUTPUT_DIR.glob(
+                f"{point_id}_*/height/{year}/sat/S2/img_{point_id}_{month:02d}.tif"
+            ))
+            if candidates:
+                result = _read_s2_tif(candidates[0])
+                if result is not None:
+                    return result
+
+    # 2 — satellite cache fallback
+    cache = _get_sat_cache()
+    if cache is not None:
+        centre = _get_point_centre(point_id)
+        if centre:
+            lat_c, lon_c = centre
+            tile_id, _ = cache.get_tile_info(lat_c, lon_c)
+            if cache.is_sat_complete(tile_id, year):
+                sat_dir = cache.tile_sat_dir(tile_id, year)
+                for month in month_order:
+                    tif_path = sat_dir / "S2" / f"tile_{month:02d}.tif"
+                    if tif_path.exists():
+                        result = _read_s2_tif(tif_path)
+                        if result is not None:
+                            logger.debug(f"S2 loaded from sat_cache for {point_id}/{year} month {month}")
+                            return result
+
     return None
 
 
@@ -360,6 +417,8 @@ def _render_on_background(
     height_class:   Optional[str],
     show_polygon:   bool = True,
     show_sam_mask:  bool = True,
+    show_height:    bool = True,
+    height_m:       Optional[float] = None,
 ) -> np.ndarray:
     """
     Overlay SAM mask and polygon boundary onto canvas.
@@ -422,6 +481,26 @@ def _render_on_background(
         )
         cv2.polylines(out, [pts], isClosed=True, color=(0, 220, 255), thickness=2)
 
+    # ── Height label ──────────────────────────────────────────────────────
+    if show_height and height_m is not None and polygon_coords:
+        pts_arr = np.array(
+            [_geo_to_px(lon, lat, west, south, east, north, w, h)
+             for lon, lat in polygon_coords],
+            dtype=np.int32
+        )
+        cx = int(np.mean(pts_arr[:, 0]))
+        cy = int(np.mean(pts_arr[:, 1]))
+        label = f"{height_m:.1f}m"
+        font  = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.5
+        (tw, th), _ = cv2.getTextSize(label, font, scale, 1)
+        cv2.rectangle(out,
+                      (cx - tw // 2 - 3, cy - th - 3),
+                      (cx + tw // 2 + 3, cy + 3),
+                      (0, 0, 0), -1)
+        cv2.putText(out, label, (cx - tw // 2, cy),
+                    font, scale, (255, 255, 255), 1, cv2.LINE_AA)
+
     return out
 
 
@@ -448,28 +527,40 @@ def _build_height_bg(point_id, year, out_size, poly_bbox_wgs84=None):
     """
     Return (bg_array, bbox_wgs84) for the height raster view.
     Always shows the full point neighbourhood (128×128 raster).
-    If poly_bbox_wgs84 is given, also returns the coordinates so the
-    caller can draw overlays in the correct geographic space.
+
+    The pred.tif is centred on the sat_cache SNAPPED grid node, not on the
+    raw GPS point.  We therefore prefer the bbox from cache.get_tile_info()
+    so the displayed raster aligns exactly with the overlaid polygons.
+    Falling back to _point_bbox_from_config() only when the cache is not
+    available (the offset is then at most half a grid cell ≈ 320 m).
     """
     import cv2
     pred = _load_pred_tif(point_id, year)
     if pred is None:
         return None, None
 
-    # Get point centre from points table for accurate bbox
+    # Resolve the geographic centre / bbox
     centre = _get_point_centre(point_id)
-    if centre:
+
+    # Prefer snapped bbox from sat_cache — matches the pred.tif geotransform
+    bbox = None
+    cache = _get_sat_cache()
+    if cache is not None and centre:
         lat_c, lon_c = centre
-    else:
-        # Fallback: estimate from polygon coords
-        if poly_bbox_wgs84:
+        _, bbox = cache.get_tile_info(lat_c, lon_c)
+
+    # Fall back to raw GPS computation when cache unavailable
+    if bbox is None:
+        if centre:
+            lat_c, lon_c = centre
+        elif poly_bbox_wgs84:
             pw, ps, pe, pn = poly_bbox_wgs84
             lat_c = (ps + pn) / 2
             lon_c = (pw + pe) / 2
         else:
             return None, None
+        bbox = _point_bbox_from_config(lat_c, lon_c)
 
-    bbox = _point_bbox_from_config(lat_c, lon_c)
     coloured = _apply_colormap(pred, vmin=0, vmax=_HEIGHT_VIS_MAX, cmap_name="inferno")
     bg = cv2.resize(coloured, (out_size, out_size), interpolation=cv2.INTER_LINEAR)
     return bg, bbox
@@ -560,14 +651,37 @@ def api_plots(point_id: str):
 @app.route("/api/available/<point_id>")
 def api_available(point_id: str):
     result = {"pred_tifs": {}, "sat_tifs": {}}
-    if _OUTPUT_DIR:
-        for year in _HEIGHT_YEARS:
-            result["pred_tifs"][year] = bool(list(_OUTPUT_DIR.glob(
+
+    # Pre-resolve the sat_cache tile_id for this point once
+    cache   = _get_sat_cache()
+    tile_id = None
+    if cache is not None:
+        centre = _get_point_centre(point_id)
+        if centre:
+            tile_id, _ = cache.get_tile_info(*centre)
+
+    for year in _HEIGHT_YEARS:
+        has_pred = False
+        has_sat  = False
+
+        # Check per-point output directory
+        if _OUTPUT_DIR:
+            has_pred = bool(list(_OUTPUT_DIR.glob(
                 f"{point_id}_*/height/{year}/pred/img_{point_id}_pred.tif"
             )))
-            result["sat_tifs"][year] = bool(list(_OUTPUT_DIR.glob(
+            has_sat = bool(list(_OUTPUT_DIR.glob(
                 f"{point_id}_*/height/{year}/sat/S2/img_{point_id}_??.tif"
             )))
+
+        # Fall back to sat_cache if not found in output dir
+        if not has_pred and cache is not None and tile_id:
+            has_pred = cache.is_pred_complete(tile_id, year)
+        if not has_sat and cache is not None and tile_id:
+            has_sat = cache.is_sat_complete(tile_id, year)
+
+        result["pred_tifs"][year] = has_pred
+        result["sat_tifs"][year]  = has_sat
+
     return jsonify(result)
 
 
@@ -588,11 +702,12 @@ def api_render_plot():
     cluster_id = request.args.get("cluster_id", None)
     year       = int(request.args.get("year",   _HEIGHT_YEARS[0] if _HEIGHT_YEARS else 0))
     view       = request.args.get("view",       "esri")
-    show_poly  = request.args.get("show_polygon",  "1") == "1"
-    show_mask  = request.args.get("show_sam_mask", "1") == "1"
-    zoom       = int(request.args.get("zoom", 19))
-    pad        = float(request.args.get("pad", 0.0003))
-    OUT        = 500   # output image size
+    show_poly   = request.args.get("show_polygon",  "1") == "1"
+    show_mask   = request.args.get("show_sam_mask", "1") == "1"
+    show_height = request.args.get("show_height",   "1") == "1"
+    zoom        = int(request.args.get("zoom", 19))
+    pad         = float(request.args.get("pad", 0.0003))
+    OUT         = 500   # output image size
 
     # Look up row
     df   = _DF_STAGE1 if stage == "stage1" else _DF_STAGE2
@@ -612,6 +727,7 @@ def api_render_plot():
     poly_bbox = _coords_bbox(polygon_coords)   # (west, south, east, north)
 
     height_class = _safe_str(row.get(f"height_class_{year}", None))
+    height_m_val = _safe_float(row.get(f"height_m_{year}", None))
     sam_mask_wkt = str(row.get("sam_mask_wkt", ""))
 
     # ── Build background + determine render bbox ──────────────────────────
@@ -649,6 +765,8 @@ def api_render_plot():
         height_class   = height_class,
         show_polygon   = show_poly,
         show_sam_mask  = show_mask,
+        show_height    = show_height,
+        height_m       = height_m_val,
     )
 
     return jsonify({"image": _img_to_b64(rendered)})
@@ -667,9 +785,9 @@ def api_render_overview():
     year       = int(request.args.get("year", _HEIGHT_YEARS[0] if _HEIGHT_YEARS else 0))
     view       = request.args.get("view", "esri")
     zoom       = int(request.args.get("zoom", 18))
-    show_poly  = request.args.get("show_polygon",    "1") == "1"
-    show_mask  = request.args.get("show_sam_mask",   "1") == "1"
-    show_val   = request.args.get("show_height_val", "1") == "1"
+    show_poly  = request.args.get("show_polygon",  "1") == "1"
+    show_mask  = request.args.get("show_sam_mask", "1") == "1"
+    show_val   = request.args.get("show_height",   "1") == "1"
     OUT        = 900
 
     # Collect all plot rows

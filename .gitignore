@@ -21,9 +21,13 @@ models/
 
 # ── Pipeline output (generated artifacts) ────────────────────────────────────
 pipeline_output/
+modeltown_results/
+pipeline_results/
+gulberg_II_III_results/
 
 # ── ESRI tile cache (downloaded on demand) ────────────────────────────────────
 esri_vis_cache/
+sat_cache/
 
 # ── Regional map tiles (large image assets — manage outside git) ──────────────
 regional_data/

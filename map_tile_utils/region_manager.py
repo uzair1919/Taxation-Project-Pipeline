@@ -7,6 +7,7 @@ All operations are function-based for easy pipeline integration.
 
 import json
 import csv
+import math
 import os
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
@@ -251,6 +252,77 @@ def _point_in_quadrilateral(lat: float, lon: float, corners: Dict) -> bool:
     return positive == 4 or negative == 4
 
 
+def _point_to_segment_distance(lat: float, lon: float,
+                               p1_lat: float, p1_lon: float,
+                               p2_lat: float, p2_lon: float) -> float:
+    """
+    Minimum distance from (lat, lon) to the line segment (p1 → p2).
+
+    Longitude is scaled by cos(lat) so the result approximates a uniform
+    Euclidean metric.  The unit is degrees (suitable for comparison only).
+    """
+    cos_lat = math.cos(math.radians(lat))
+
+    # Translate to a local flat space with p1 at origin
+    px = (lon   - p1_lon) * cos_lat
+    py =  lat   - p1_lat
+    dx = (p2_lon - p1_lon) * cos_lat
+    dy =  p2_lat - p1_lat
+
+    seg_len_sq = dx * dx + dy * dy
+    if seg_len_sq < 1e-20:          # degenerate zero-length segment
+        return math.sqrt(px * px + py * py)
+
+    # Parameter of the closest point on the (infinite) line, clamped to [0, 1]
+    t = max(0.0, min(1.0, (px * dx + py * dy) / seg_len_sq))
+
+    rx = px - dx * t
+    ry = py - dy * t
+    return math.sqrt(rx * rx + ry * ry)
+
+
+def _boundary_depth(lat: float, lon: float, region: Dict) -> float:
+    """
+    Minimum distance from (lat, lon) to the **outer** boundary of the
+    region's tile grid.
+
+    An edge of a tile is 'outer' when no neighbouring tile exists in the
+    grid on the other side of that edge (determined by row/col adjacency).
+    A larger return value means the point sits deeper inside the region.
+
+    Returns distance in approximate degrees (cos-lat corrected).
+    """
+    tile_lookup = {(t['row'], t['col']): t for t in region['tiles']}
+    min_dist = float('inf')
+
+    for (r, c), tile in tile_lookup.items():
+        corners = tile['corners']
+
+        # (neighbour offset, corner_start, corner_end)
+        #   row decreases → "top" in typical raster grids, but the exact
+        #   geographic orientation doesn't matter — only adjacency does.
+        candidate_edges = [
+            ((r - 1, c), corners['tl'], corners['tr']),   # top edge
+            ((r + 1, c), corners['bl'], corners['br']),   # bottom edge
+            ((r, c - 1), corners['bl'], corners['tl']),   # left edge
+            ((r, c + 1), corners['br'], corners['tr']),   # right edge
+        ]
+
+        for neighbour_rc, c1, c2 in candidate_edges:
+            if neighbour_rc in tile_lookup:
+                continue  # shared interior edge — skip
+
+            d = _point_to_segment_distance(
+                lat, lon,
+                c1['lat'], c1['lon'],
+                c2['lat'], c2['lon'],
+            )
+            if d < min_dist:
+                min_dist = d
+
+    return min_dist
+
+
 def lookup_coordinate(lat: float, lon: float, buffer: int = 0, db_path: str = DB_FILE) -> Dict:
     """
     Find which region and tiles contain a coordinate.
@@ -279,67 +351,74 @@ def lookup_coordinate(lat: float, lon: float, buffer: int = 0, db_path: str = DB
         >>> result = lookup_coordinate(31.36148, 74.22393, buffer=1)
         >>> print(f"Got {result['tile_count']} tiles (3x3 grid)")
     """
-    # Load database
     db = _load_database(db_path)
-    
+
     if not db['regions']:
-        return {
-            'found': False,
-            'error': 'No regions in database'
-        }
-    
-    # Check each region
+        return {'found': False, 'error': 'No regions in database'}
+
+    # ── Phase 1: collect every region that geometrically contains the point ──
+    # We must NOT stop at the first match; overlapping societies both pass.
+    candidates = []   # list of (region_name, region_dict, center_tile_dict)
+
     for region_name, region in db['regions'].items():
-        # Quick bounds check
         if not _point_in_bounds(lat, lon, region['bounds']):
             continue
-        
-        # Find center tile that contains the point
+
         center_tile = None
         for tile in region['tiles']:
             if _point_in_quadrilateral(lat, lon, tile['corners']):
                 center_tile = tile
                 break
-        
-        if not center_tile:
-            continue
-        
-        # Collect tiles
-        tiles = [center_tile]
-        
-        # Add buffer tiles if requested
-        if buffer > 0:
-            tile_lookup = {(t['row'], t['col']): t for t in region['tiles']}
-            cr, cc = center_tile['row'], center_tile['col']
-            
-            for r in range(cr - buffer, cr + buffer + 1):
-                for c in range(cc - buffer, cc + buffer + 1):
-                    if (r, c) != (cr, cc) and (r, c) in tile_lookup:
-                        tiles.append(tile_lookup[(r, c)])
-        
-        # Mark center tile
-        for tile in tiles:
-            tile['is_center'] = (tile == center_tile)
-        
+
+        if center_tile is not None:
+            candidates.append((region_name, region, center_tile))
+
+    if not candidates:
         return {
-            'found': True,
-            'region': {
-                'name': region['name'],
-                'tile_folder': _normalize_path(region['tile_folder']),
-                'csv_path': _normalize_path(region.get('csv_path', '')),
-                'grid_rows': region['grid_rows'],
-                'grid_cols': region['grid_cols'],
-                'bounds': region['bounds']
-            },
-            'tiles': tiles,
-            'tile_count': len(tiles)
+            'found': False,
+            'message': 'Coordinate not found in any region',
+            'available_regions': list(db['regions'].keys())
         }
-    
-    # Not found
+
+    # ── Phase 2: disambiguate when multiple societies contain the point ──
+    # Choose the society where the point is deepest inside its outer boundary.
+    # A point that is only in a society because of edge-tile bleed-over will
+    # have a very small boundary depth; the correct society will have a larger
+    # one.
+    if len(candidates) > 1:
+        best_region_name, best_region, best_center_tile = max(
+            candidates,
+            key=lambda c: _boundary_depth(lat, lon, c[1])
+        )
+    else:
+        best_region_name, best_region, best_center_tile = candidates[0]
+
+    # ── Phase 3: build the tile list (centre + optional buffer) ──
+    # Use dict copies so we never mutate the data loaded from the JSON file.
+    cr, cc = best_center_tile['row'], best_center_tile['col']
+    tile_lookup = {(t['row'], t['col']): t for t in best_region['tiles']}
+
+    tiles = []
+    for r in range(cr - buffer, cr + buffer + 1):
+        for c in range(cc - buffer, cc + buffer + 1):
+            if (r, c) not in tile_lookup:
+                continue
+            t = dict(tile_lookup[(r, c)])          # shallow copy — safe to annotate
+            t['is_center'] = (r == cr and c == cc)
+            tiles.append(t)
+
     return {
-        'found': False,
-        'message': 'Coordinate not found in any region',
-        'available_regions': list(db['regions'].keys())
+        'found': True,
+        'region': {
+            'name': best_region['name'],
+            'tile_folder': _normalize_path(best_region['tile_folder']),
+            'csv_path': _normalize_path(best_region.get('csv_path', '')),
+            'grid_rows': best_region['grid_rows'],
+            'grid_cols': best_region['grid_cols'],
+            'bounds': best_region['bounds']
+        },
+        'tiles': tiles,
+        'tile_count': len(tiles)
     }
 
 def get_tile_paths(result: Dict) -> List[str]:

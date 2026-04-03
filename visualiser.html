@@ -158,8 +158,9 @@
       </div>
       <span class="vlabel">Overlays:</span>
       <div class="chk-group">
-        <label class="chk"><input type="checkbox" id="chk-poly"  checked> Boundary</label>
-        <label class="chk"><input type="checkbox" id="chk-mask"  checked> SAM Mask</label>
+        <label class="chk"><input type="checkbox" id="chk-poly"   checked> Boundary</label>
+        <label class="chk"><input type="checkbox" id="chk-mask"   checked> SAM Mask</label>
+        <label class="chk"><input type="checkbox" id="chk-height" checked> Height</label>
       </div>
       <div class="sep2"></div>
       <div class="zoom-ctrl">
@@ -334,7 +335,7 @@ async function init() {
   });
 
   // Overlay checkboxes
-  ["chk-poly","chk-mask"].forEach(id => {
+  ["chk-poly","chk-mask","chk-height"].forEach(id => {
     $(id).addEventListener("change", () => {
       if (S.selectedPlot) render(); else renderOverview();
     });
@@ -477,8 +478,9 @@ async function render() {
     plot_index:    p.plot_index,
     year:          S.year || "",
     view:          S.view,
-    show_polygon:  $("chk-poly").checked  ? "1":"0",
-    show_sam_mask: $("chk-mask").checked  ? "1":"0",
+    show_polygon:  $("chk-poly").checked   ? "1":"0",
+    show_sam_mask: $("chk-mask").checked   ? "1":"0",
+    show_height:   $("chk-height").checked ? "1":"0",
     zoom:          $("zoom-val").value,
   });
   if (p.cluster_id != null) params.set("cluster_id", p.cluster_id);
@@ -499,14 +501,14 @@ async function renderOverview() {
   document.querySelectorAll(".plot-item").forEach(e => e.classList.remove("active"));
 
   const params = new URLSearchParams({
-    point_id:        S.pid,
-    stage:           S.activeStage,
-    year:            S.year || "",
-    view:            S.view,
-    zoom:            Math.min(18, parseInt($("zoom-val").value) || 18),
-    show_polygon:    $("chk-poly").checked  ? "1":"0",
-    show_sam_mask:   $("chk-mask").checked  ? "1":"0",
-    show_height_val: "1",
+    point_id:      S.pid,
+    stage:         S.activeStage,
+    year:          S.year || "",
+    view:          S.view,
+    zoom:          Math.min(18, parseInt($("zoom-val").value) || 18),
+    show_polygon:  $("chk-poly").checked   ? "1":"0",
+    show_sam_mask: $("chk-mask").checked   ? "1":"0",
+    show_height:   $("chk-height").checked ? "1":"0",
   });
 
   try {
